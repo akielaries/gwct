@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-gwct — Gowin Command Line Tools
+gwct - Gowin Command Line Tools
 UART-based debug shell for Gowin FPGA / Cortex-M1 APB memory access.
 
 Two transport modes:
-  Local  — talk directly to UART (machine connected to FPGA)
-  Remote — talk to gwct_server.py over TCP (laptop / remote machine)
+  Local  - talk directly to UART (machine connected to FPGA)
+  Remote - talk to gwct_server.py over TCP (laptop / remote machine)
 
 Usage:
     gwct --device mega60                        # local UART, Tang Mega 60K
@@ -62,14 +62,15 @@ MSG_ERR   = 0xA1
 DEFAULT_UART_PORT   = "/dev/gwct_port_2a881d3a6c78529c21dc0423699e6be3"
 DEFAULT_UART_BAUD   = 115200
 DEFAULT_SERVER_PORT = 65432
-TIMEOUT_S           = 5.0
+TIMEOUT_S           = 5.0    # UART transactions
+LOAD_TIMEOUT_S      = 120.0  # bitstream transfer + programming
 
 HISTORY_FILE = Path.home() / ".gwct_history"
 
-# Commands that take a file path as their second token — used for tab completion
+# Commands that take a file path as their second token - used for tab completion
 FILE_COMMANDS = {"load", "script"}
 
-# All top-level commands — used for command completion
+# All top-level commands - used for command completion
 ALL_COMMANDS = [
     "memrd", "memwr", "dump", "load", "watch", "reset",
     "list", "info", "script", "exec", "history",
@@ -108,10 +109,10 @@ def parse_response(raw: bytes) -> tuple:
 class GWCTCompleter:
     """
     Tab completion:
-      - First token        → complete from ALL_COMMANDS
-      - 'load' / 'script'  → complete file paths (any file)
-      - 'exec'             → complete from PATH executables + file paths
-      - 'list'             → complete sub-commands (hw)
+      - First token        ? complete from ALL_COMMANDS
+      - 'load' / 'script'  ? complete file paths (any file)
+      - 'exec'             ? complete from PATH executables + file paths
+      - 'list'             ? complete sub-commands (hw)
     """
 
     def __init__(self):
@@ -145,17 +146,17 @@ class GWCTCompleter:
         if cmd == "list":
             return [s for s in ["hw "] if s.startswith(text)]
 
-        # 'load' and 'script' — file path completion
+        # 'load' and 'script' - file path completion
         if cmd in FILE_COMMANDS:
             return self._file_matches(text, extensions=[".fs", ".gwct", ""])
 
-        # 'exec' — executables on PATH + local files
+        # 'exec' - executables on PATH + local files
         if cmd == "exec":
             if len(tokens) == 1 or (len(tokens) == 2 and not line.endswith(" ")):
                 # completing the executable name
                 return self._executable_matches(text) + self._file_matches(text)
             else:
-                # completing arguments to the exec'd command — just file paths
+                # completing arguments to the exec'd command - just file paths
                 return self._file_matches(text)
 
         return []
@@ -283,10 +284,13 @@ class RemoteTransport:
                 pass
             self.sock = None
 
-    def _recv_exact(self, n: int) -> bytes:
+    def _recv_exact(self, n: int, timeout: float = None) -> bytes:
+        timeout  = timeout or TIMEOUT_S
         buf      = b""
-        deadline = time.monotonic() + TIMEOUT_S
+        deadline = time.monotonic() + timeout
         while len(buf) < n:
+            remaining_t = max(0.1, deadline - time.monotonic())
+            self.sock.settimeout(remaining_t)
             try:
                 chunk = self.sock.recv(n - len(buf))
             except socket.timeout:
@@ -295,6 +299,7 @@ class RemoteTransport:
                 buf += chunk
             if time.monotonic() > deadline:
                 raise TimeoutError(f"TCP recv timeout: got {len(buf)}/{n}")
+        self.sock.settimeout(TIMEOUT_S)   # restore default
         return buf
 
     def uart_transact(self, pkt: bytes) -> bytes:
@@ -308,14 +313,31 @@ class RemoteTransport:
     def load_bitstream(self, path: str, board: str) -> dict:
         data      = Path(path).read_bytes()
         board_enc = board.encode()
+        file_size = len(data)
+
+        # Send header
         self.sock.sendall(
             bytes([MSG_LOAD])
-            + struct.pack(">I", len(data))
+            + struct.pack(">I", file_size)
             + bytes([len(board_enc)]) + board_enc
-            + data
         )
-        resp_len = struct.unpack(">I", self._recv_exact(4))[0]
-        return json.loads(self._recv_exact(resp_len).decode())
+
+        # Send bitstream in chunks with progress
+        chunk_size = 65536
+        sent = 0
+        while sent < file_size:
+            chunk = data[sent:sent + chunk_size]
+            self.sock.sendall(chunk)
+            sent += len(chunk)
+            pct = sent / file_size * 100
+            print(f"  uploading... {pct:5.1f}%  ({sent:,}/{file_size:,} bytes)", end="\r")
+        print()
+
+        # Wait for programming to complete - use long timeout
+        print("  programming... (waiting for openFPGALoader)")
+        resp_len_bytes = self._recv_exact(4, timeout=LOAD_TIMEOUT_S)
+        resp_len = struct.unpack(">I", resp_len_bytes)[0]
+        return json.loads(self._recv_exact(resp_len, timeout=LOAD_TIMEOUT_S).decode())
 
     def ping(self) -> bool:
         try:
@@ -377,12 +399,12 @@ def print_load_result(result: dict):
     if result["stderr"]:
         print(result["stderr"])
     rc = result["returncode"]
-    print(f"  {'✓ programming succeeded' if rc == 0 else f'✗ programming failed (rc={rc})'}")
+    print(f"  {'OK programming succeeded' if rc == 0 else f'FAIL programming failed (rc={rc})'}")
 
 
 def cmd_list_hw(gwct: GWCT):
     info = gwct.device_info
-    print(f"\n  device    : {gwct.device_alias}  —  {info.get('desc', '(unknown)')}")
+    print(f"\n  device    : {gwct.device_alias}  -  {info.get('desc', '(unknown)')}")
     print(f"  ofl board : {gwct.board}")
     print(f"  transport : {gwct.transport.describe()}")
     try:
@@ -396,11 +418,11 @@ def cmd_list_hw(gwct: GWCT):
         )
         ver_str = f"{(ver>>16)&0xFFFF}.{(ver>>8)&0xFF}.{ver&0xFF}"
         print(f"\n  sysinfo:")
-        print(f"    magic   : 0x{magic:08X}  {'✓' if magic == 0xDEADBEEF else '✗'}")
+        print(f"    magic   : 0x{magic:08X}  {'OK' if magic == 0xDEADBEEF else 'FAIL'}")
         print(f"    mfg     : {mfg_str}")
         print(f"    version : {ver_str}")
     except Exception as e:
-        print(f"\n  sysinfo  : [error — {e}]")
+        print(f"\n  sysinfo  : [error - {e}]")
     print()
 
 
@@ -511,7 +533,7 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
                 while True:
                     val    = gwct.memrd(addr)
                     ts     = time.strftime("%H:%M:%S")
-                    marker = "  ◄" if (prev is not None and val != prev) else ""
+                    marker = "  #" if (prev is not None and val != prev) else ""
                     print(f"  [{ts}]  0x{addr:08X}  =>  0x{val:08X}  ({val}){marker}")
                     prev = val
                     time.sleep(interval)
@@ -573,7 +595,7 @@ def run_script(gwct: GWCT, path: str):
 # ---------------------------------------------------------------------------
 
 HELP_TEXT = """
-Gowin Command Line Tools — commands:
+Gowin Command Line Tools - commands:
 
   -- memory --
   memrd  <addr> [count]        read 32-bit word(s)
@@ -600,18 +622,13 @@ Tab completes commands, file paths (load/script), and executables (exec).
 """
 
 BANNER = """
-   ██████╗ ██╗    ██╗ ██████╗████████╗
-  ██╔════╝ ██║    ██║██╔════╝╚══██╔══╝
-  ██║  ███╗██║ █╗ ██║██║        ██║
-  ██║   ██║██║███╗██║██║        ██║
-  ╚██████╔╝╚███╔███╔╝╚██████╗   ██║
-   ╚═════╝  ╚══╝╚══╝  ╚═════╝   ╚═╝
   Gowin Command Line Tools  v0.4
+  ==============================
 """
 
 def run_shell(gwct: GWCT):
     print(BANNER)
-    print(f"  device    : {gwct.device_alias}  —  {gwct.device_info.get('desc', '(unknown)')}")
+    print(f"  device    : {gwct.device_alias}  -  {gwct.device_info.get('desc', '(unknown)')}")
     print(f"  transport : {gwct.transport.describe()}")
     print(f"\n  type 'help' for commands, 'list hw' to probe device\n")
 

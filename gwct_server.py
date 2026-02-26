@@ -121,13 +121,15 @@ class GWCTServer:
                     break
         self.uart.close()
 
-    def _recv_exact(self, conn: socket.socket, n: int) -> bytes:
+    def _recv_exact(self, conn: socket.socket, n: int, timeout: float = 30.0) -> bytes:
         buf = b""
+        conn.settimeout(timeout)
         while len(buf) < n:
-            chunk = conn.recv(n - len(buf))
+            chunk = conn.recv(min(65536, n - len(buf)))
             if not chunk:
                 raise ConnectionError("Client disconnected")
             buf += chunk
+        conn.settimeout(None)
         return buf
 
     def _handle(self, conn: socket.socket, addr):
@@ -164,8 +166,8 @@ class GWCTServer:
                     board_len  = self._recv_exact(conn, 1)[0]
                     board      = self._recv_exact(conn, board_len).decode()
 
-                    # bitstream data
-                    data = self._recv_exact(conn, file_size)
+                    # bitstream data — large transfer, use generous timeout
+                    data = self._recv_exact(conn, file_size, timeout=120.0)
                     log.info(f"Received {file_size} bytes, board={board}")
 
                     with tempfile.NamedTemporaryFile(suffix=".fs", delete=False) as f:
@@ -174,7 +176,7 @@ class GWCTServer:
                     try:
                         result = subprocess.run(
                             ["openFPGALoader", "-v", "-b", board, tmp],
-                            capture_output=True, text=True, timeout=60
+                            capture_output=True, text=True, timeout=120
                         )
                         resp = json.dumps({
                             "returncode": result.returncode,
