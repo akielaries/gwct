@@ -11,6 +11,8 @@ access to your entire APB register map from a host shell
                                                   <--[ JTAG ]--> (programming)
 ```
 
+<video src="media/gwct_example.mp4" controls width="700"></video>
+
 ---
 
 ## Requirements

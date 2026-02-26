@@ -84,7 +84,6 @@ ALL_COMMANDS = [
     "info",
     "script",
     "exec",
-    "history",
     "reconnect",
     "help",
     "quit",
@@ -728,10 +727,6 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
         else:
             run_script(gwct, parts[1])
 
-    elif cmd == "history":
-        for i in range(readline.get_current_history_length()):
-            print(f"  {i+1:4d}  {readline.get_history_item(i+1)}")
-
     elif cmd == "reconnect":
         gwct.disconnect()
         try:
@@ -796,7 +791,6 @@ Gowin Command Line Tool commands:
   -- shell --
   exec   <cmd> [args...]       run a host system command      [tab complete]
   script <file.gwct>           run a script file              [tab complete]
-  history                      show command history
   reconnect                    reopen connection
   help                         this message
   quit / exit / q              exit
