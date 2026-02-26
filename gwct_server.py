@@ -13,6 +13,7 @@ All messages start with a 1-byte type. The server is single-threaded per
 connection to avoid UART contention.
 """
 
+import argparse
 import socket
 import serial
 import subprocess
@@ -25,21 +26,18 @@ import struct
 import time
 from pathlib import Path
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("gwct_server")
 
 # ---------------------------------------------------------------------------
 # Message types
 # ---------------------------------------------------------------------------
-MSG_UART    = 0x01   # raw UART transaction: send 11 bytes, recv 7 bytes
-MSG_LOAD    = 0x10   # bitstream load
-MSG_PING    = 0x20
-MSG_PONG    = 0x21
-MSG_OK      = 0xA0
-MSG_ERR     = 0xA1
+MSG_UART = 0x01  # raw UART transaction: send 11 bytes, recv 7 bytes
+MSG_LOAD = 0x10  # bitstream load
+MSG_PING = 0x20
+MSG_PONG = 0x21
+MSG_OK = 0xA0
+MSG_ERR = 0xA1
 
 # UART framing constants (must match gwct_packet.v)
 UART_TX_LEN = 11
@@ -48,27 +46,28 @@ UART_TIMEOUT = 2.0
 
 DEFAULT_UART_PORT = "/dev/gwct_port_2a881d3a6c78529c21dc0423699e6be3"
 DEFAULT_UART_BAUD = 115200
-DEFAULT_BOARD     = "tangnano20k"
-SERVER_HOST       = "0.0.0.0"
-SERVER_PORT       = 65432
+DEFAULT_BOARD = "tangnano20k"
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT = 65432
 
 
 class UARTBridge:
-    """Thread-safe wrapper around the FPGA UART."""
+    """Thread-safe wrapper around the FPGA UART..."""
+
     def __init__(self, port: str, baud: int):
         self.port = port
         self.baud = baud
-        self.ser  = None
+        self.ser = None
         self.lock = threading.Lock()
 
     def open(self):
         self.ser = serial.Serial(
-            port     = self.port,
-            baudrate = self.baud,
-            bytesize = serial.EIGHTBITS,
-            parity   = serial.PARITY_NONE,
-            stopbits = serial.STOPBITS_ONE,
-            timeout  = UART_TIMEOUT
+            port=self.port,
+            baudrate=self.baud,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=UART_TIMEOUT,
         )
         log.info(f"UART open: {self.port} @ {self.baud}")
 
@@ -83,7 +82,7 @@ class UARTBridge:
             self.ser.write(pkt)
             self.ser.flush()
 
-            raw      = b""
+            raw = b""
             deadline = time.monotonic() + UART_TIMEOUT
             while len(raw) < UART_RX_LEN:
                 chunk = self.ser.read(UART_RX_LEN - len(raw))
@@ -97,12 +96,18 @@ class UARTBridge:
 
 
 class GWCTServer:
-    def __init__(self, uart_port=DEFAULT_UART_PORT, uart_baud=DEFAULT_UART_BAUD,
-                 board=DEFAULT_BOARD, host=SERVER_HOST, port=SERVER_PORT):
-        self.uart  = UARTBridge(uart_port, uart_baud)
+    def __init__(
+        self,
+        uart_port=DEFAULT_UART_PORT,
+        uart_baud=DEFAULT_UART_BAUD,
+        board=DEFAULT_BOARD,
+        host=SERVER_HOST,
+        port=SERVER_PORT,
+    ):
+        self.uart = UARTBridge(uart_port, uart_baud)
         self.board = board
-        self.host  = host
-        self.port  = port
+        self.host = host
+        self.port = port
 
     def start(self):
         self.uart.open()
@@ -114,7 +119,9 @@ class GWCTServer:
             while True:
                 try:
                     conn, addr = srv.accept()
-                    t = threading.Thread(target=self._handle, args=(conn, addr), daemon=True)
+                    t = threading.Thread(
+                        target=self._handle, args=(conn, addr), daemon=True
+                    )
                     t.start()
                 except KeyboardInterrupt:
                     log.info("Shutting down")
@@ -160,11 +167,11 @@ class GWCTServer:
                 elif msg_type == MSG_LOAD:
                     # 4-byte file size
                     size_bytes = self._recv_exact(conn, 4)
-                    file_size  = struct.unpack(">I", size_bytes)[0]
+                    file_size = struct.unpack(">I", size_bytes)[0]
 
                     # 1-byte board string length + board string
-                    board_len  = self._recv_exact(conn, 1)[0]
-                    board      = self._recv_exact(conn, board_len).decode()
+                    board_len = self._recv_exact(conn, 1)[0]
+                    board = self._recv_exact(conn, board_len).decode()
 
                     # bitstream data — large transfer, use generous timeout
                     data = self._recv_exact(conn, file_size, timeout=120.0)
@@ -187,7 +194,7 @@ class GWCTServer:
                             ["openFPGALoader", "-v", "-b", board, tmp],
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
-                            bufsize=0   # unbuffered bytes
+                            bufsize=0,  # unbuffered bytes
                         )
                         buf = b""
                         while True:
@@ -196,15 +203,21 @@ class GWCTServer:
                                 break
                             if ch in (b"\n", b"\r"):
                                 if buf:
-                                    line_bytes = buf[:65534]  # max fits in 2-byte length
-                                    conn.sendall(struct.pack(">H", len(line_bytes)) + line_bytes)
+                                    line_bytes = buf[
+                                        :65534
+                                    ]  # max fits in 2-byte length
+                                    conn.sendall(
+                                        struct.pack(">H", len(line_bytes)) + line_bytes
+                                    )
                                     buf = b""
                             else:
                                 buf += ch
                         # flush any remaining partial line
                         if buf:
                             line_bytes = buf[:65534]
-                            conn.sendall(struct.pack(">H", len(line_bytes)) + line_bytes)
+                            conn.sendall(
+                                struct.pack(">H", len(line_bytes)) + line_bytes
+                            )
                         proc.wait(timeout=120)
                         rc = proc.returncode
                         # end-of-stream sentinel 0xFFFF + 4-byte signed return code
@@ -237,13 +250,12 @@ class GWCTServer:
 
 
 def main():
-    import argparse
     p = argparse.ArgumentParser(description="GWCT server")
-    p.add_argument("--uart",  default=DEFAULT_UART_PORT, help="UART device")
-    p.add_argument("--baud",  type=int, default=DEFAULT_UART_BAUD)
+    p.add_argument("--uart", default=DEFAULT_UART_PORT, help="UART device")
+    p.add_argument("--baud", type=int, default=DEFAULT_UART_BAUD)
     p.add_argument("--board", default=DEFAULT_BOARD, help="openFPGALoader board type")
-    p.add_argument("--host",  default=SERVER_HOST)
-    p.add_argument("--port",  type=int, default=SERVER_PORT)
+    p.add_argument("--host", default=SERVER_HOST)
+    p.add_argument("--port", type=int, default=SERVER_PORT)
     args = p.parse_args()
 
     server = GWCTServer(
@@ -251,7 +263,7 @@ def main():
         uart_baud=args.baud,
         board=args.board,
         host=args.host,
-        port=args.port
+        port=args.port,
     )
     server.start()
 
