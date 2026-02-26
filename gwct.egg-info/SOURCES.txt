@@ -1,0 +1,11 @@
+README.md
+gwct.py
+gwct_server.py
+pyproject.toml
+setup.py
+gwct.egg-info/PKG-INFO
+gwct.egg-info/SOURCES.txt
+gwct.egg-info/dependency_links.txt
+gwct.egg-info/entry_points.txt
+gwct.egg-info/requires.txt
+gwct.egg-info/top_level.txt
