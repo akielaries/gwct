@@ -12,10 +12,6 @@ Usage:
     gwct --device nano9k                        # local UART, Tang Nano 9K
     gwct --device mega60 --remote 192.168.1.10  # remote via gwct_server
     gwct --list-devices                         # show all known devices
-
-Device map drives:
-  - openFPGALoader --board argument for 'load' command
-  - Any future device-specific behaviour
 """
 
 import serial
@@ -25,32 +21,26 @@ import time
 import socket
 import json
 import os
+import subprocess
 import readline
+import glob
 import argparse
 from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Device map  —  gwct device alias → openFPGALoader board string + description
-# Add new entries here as new boards are supported.
+# Device map
 # ---------------------------------------------------------------------------
 DEVICE_MAP = {
-    # Tang Mega
-    "mega60":    {"board": "tangprimer20k",   "desc": "Tang Mega 60K  (GW5AT-60)"},
-    "mega138":   {"board": "tangprimer20k",   "desc": "Tang Mega 138K (GW5AST-138)"},
-    # Tang Nano
-    "nano1k":    {"board": "tangnano1k",      "desc": "Tang Nano 1K   (GW1NZ-1)"},
-    "nano4k":    {"board": "tangnano4k",      "desc": "Tang Nano 4K   (GW1NSR-4C)"},
-    "nano9k":    {"board": "tangnano9k",      "desc": "Tang Nano 9K   (GW1NR-9)"},
-    "nano20k":   {"board": "tangnano20k",     "desc": "Tang Nano 20K  (GW2AR-18)"},
-    # Tang Primer
-    "primer20k": {"board": "tangprimer20k",   "desc": "Tang Primer 20K (GW2A-18C)"},
-    "primer25k": {"board": "tangprimer25k",   "desc": "Tang Primer 25K (GW5A-25)"},
+    "mega60":    {"board": "tangconsole",    "desc": "Tang Mega 60K  (GW5AT-60)"},
+    "mega138":   {"board": "tangconsole",    "desc": "Tang Mega 138K (GW5AST-138)"},
+    "nano1k":    {"board": "tangnano1k",     "desc": "Tang Nano 1K   (GW1NZ-1)"},
+    "nano4k":    {"board": "tangnano4k",     "desc": "Tang Nano 4K   (GW1NSR-4C)"},
+    "nano9k":    {"board": "tangnano9k",     "desc": "Tang Nano 9K   (GW1NR-9)"},
+    "nano20k":   {"board": "tangnano20k",    "desc": "Tang Nano 20K  (GW2AR-18)"},
+    "primer20k": {"board": "tangprimer20k",  "desc": "Tang Primer 20K (GW2A-18C)"},
+    "primer25k": {"board": "tangprimer25k",  "desc": "Tang Primer 25K (GW5A-25)"},
 }
-
-# openFPGALoader board string for mega60/138 — both use tangconsole
-DEVICE_MAP["mega60"]["board"]  = "tangconsole"
-DEVICE_MAP["mega138"]["board"] = "tangconsole"
 
 # ---------------------------------------------------------------------------
 # Protocol constants
@@ -76,6 +66,16 @@ TIMEOUT_S           = 5.0
 
 HISTORY_FILE = Path.home() / ".gwct_history"
 
+# Commands that take a file path as their second token — used for tab completion
+FILE_COMMANDS = {"load", "script"}
+
+# All top-level commands — used for command completion
+ALL_COMMANDS = [
+    "memrd", "memwr", "dump", "load", "watch", "reset",
+    "list", "info", "script", "exec", "history",
+    "reconnect", "help", "quit", "exit",
+]
+
 # ---------------------------------------------------------------------------
 # Packet helpers
 # ---------------------------------------------------------------------------
@@ -100,6 +100,117 @@ def parse_response(raw: bytes) -> tuple:
         raise ValueError(f"Checksum mismatch: got 0x{chk:02X} expected 0x{_xor(raw[:6]):02X}")
     data = d0 | (d1 << 8) | (d2 << 16) | (d3 << 24)
     return (cmd != CMD_ERROR), cmd, data
+
+# ---------------------------------------------------------------------------
+# Tab completion
+# ---------------------------------------------------------------------------
+
+class GWCTCompleter:
+    """
+    Tab completion:
+      - First token        → complete from ALL_COMMANDS
+      - 'load' / 'script'  → complete file paths (any file)
+      - 'exec'             → complete from PATH executables + file paths
+      - 'list'             → complete sub-commands (hw)
+    """
+
+    def __init__(self):
+        self._matches = []
+
+    def complete(self, text: str, state: int) -> Optional[str]:
+        if state == 0:
+            self._matches = self._get_matches(text)
+        try:
+            return self._matches[state]
+        except IndexError:
+            return None
+
+    def _get_matches(self, text: str) -> list:
+        # Figure out where we are in the line
+        line   = readline.get_line_buffer()
+        tokens = line[:readline.get_endidx()].split()
+
+        # Are we completing the first token (the command itself)?
+        completing_cmd = (
+            len(tokens) == 0
+            or (len(tokens) == 1 and not line.endswith(" "))
+        )
+
+        if completing_cmd:
+            return [c + " " for c in ALL_COMMANDS if c.startswith(text)]
+
+        cmd = tokens[0].lower()
+
+        # 'list hw'
+        if cmd == "list":
+            return [s for s in ["hw "] if s.startswith(text)]
+
+        # 'load' and 'script' — file path completion
+        if cmd in FILE_COMMANDS:
+            return self._file_matches(text, extensions=[".fs", ".gwct", ""])
+
+        # 'exec' — executables on PATH + local files
+        if cmd == "exec":
+            if len(tokens) == 1 or (len(tokens) == 2 and not line.endswith(" ")):
+                # completing the executable name
+                return self._executable_matches(text) + self._file_matches(text)
+            else:
+                # completing arguments to the exec'd command — just file paths
+                return self._file_matches(text)
+
+        return []
+
+    def _file_matches(self, text: str, extensions: list = None) -> list:
+        """Expand glob for the given text prefix, optionally filtering by extension."""
+        pattern = (text or "") + "*"
+        try:
+            matches = glob.glob(os.path.expanduser(pattern))
+        except Exception:
+            return []
+        results = []
+        for m in sorted(matches):
+            if os.path.isdir(m):
+                results.append(m.rstrip("/") + "/")
+            elif extensions is None or any(m.endswith(e) for e in extensions):
+                results.append(m + " ")
+        return results
+
+    def _executable_matches(self, text: str) -> list:
+        """Find executables on PATH that start with text."""
+        matches = set()
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            try:
+                for name in os.listdir(directory):
+                    if name.startswith(text):
+                        full = os.path.join(directory, name)
+                        if os.access(full, os.X_OK):
+                            matches.add(name + " ")
+            except OSError:
+                pass
+        return sorted(matches)
+
+
+def setup_readline():
+    try:
+        readline.read_history_file(HISTORY_FILE)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(500)
+
+    completer = GWCTCompleter()
+    readline.set_completer(completer.complete)
+
+    # Both libedit (macOS) and libreadline (Linux) supported
+    if "libedit" in readline.__doc__:
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
+    # Don't treat / as a word break so path completion works naturally
+    readline.set_completer_delims(
+        readline.get_completer_delims().replace("/", "").replace("-", "")
+    )
+
 
 # ---------------------------------------------------------------------------
 # Transports
@@ -139,7 +250,6 @@ class LocalTransport:
         return raw
 
     def load_bitstream(self, path: str, board: str) -> dict:
-        import subprocess
         result = subprocess.run(
             ["openFPGALoader", "-v", "-b", board, path],
             capture_output=True, text=True, timeout=60
@@ -196,15 +306,15 @@ class RemoteTransport:
         raise RuntimeError(f"Server UART error: {err}")
 
     def load_bitstream(self, path: str, board: str) -> dict:
-        data       = Path(path).read_bytes()
-        board_enc  = board.encode()
+        data      = Path(path).read_bytes()
+        board_enc = board.encode()
         self.sock.sendall(
             bytes([MSG_LOAD])
             + struct.pack(">I", len(data))
             + bytes([len(board_enc)]) + board_enc
             + data
         )
-        resp_len  = struct.unpack(">I", self._recv_exact(4))[0]
+        resp_len = struct.unpack(">I", self._recv_exact(4))[0]
         return json.loads(self._recv_exact(resp_len).decode())
 
     def ping(self) -> bool:
@@ -253,166 +363,73 @@ class GWCT:
     def ping(self) -> bool:
         return self.transport.ping()
 
+
 # ---------------------------------------------------------------------------
-# Shell helpers
+# Command implementations
 # ---------------------------------------------------------------------------
 
 def parse_int(s: str) -> int:
     return int(s.strip(), 0)
 
 def print_load_result(result: dict):
-    rc = result["returncode"]
     if result["stdout"]:
         print(result["stdout"])
     if result["stderr"]:
-        # openFPGALoader writes progress to stderr — always show it
         print(result["stderr"])
-    if rc == 0:
-        print(f"  ✓ programming succeeded")
-    else:
-        print(f"  ✗ programming failed (rc={rc})")
+    rc = result["returncode"]
+    print(f"  {'✓ programming succeeded' if rc == 0 else f'✗ programming failed (rc={rc})'}")
 
-HELP_TEXT = """
-Gowin Command Line Tools — commands:
-
-  -- memory access --
-  memrd  <addr> [count]        read 32-bit word(s)
-  memwr  <addr> <data>         write 32-bit word
-  dump   <addr> <count>        hex dump (4 words/line)
-
-  -- device --
-  list hw                      show connected device info
-  load   <file.fs>             program FPGA bitstream
-  reset                        soft reset (write 0x1 to reset register)
-  watch  <addr> [interval_ms]  poll register until Ctrl-C
-
-  -- shell --
-  script <file>                run commands from a .gwct script file
-  info                         show connection / device info
-  reconnect                    reopen connection
-  history                      show command history
-  help                         this message
-  quit / exit / q              exit
-
-Addresses can be decimal or 0x hex.
-"""
-
-BANNER = """
-   ██████╗ ██╗    ██╗ ██████╗████████╗
-  ██╔════╝ ██║    ██║██╔════╝╚══██╔══╝
-  ██║  ███╗██║ █╗ ██║██║        ██║
-  ██║   ██║██║███╗██║██║        ██║
-  ╚██████╔╝╚███╔███╔╝╚██████╗   ██║
-   ╚═════╝  ╚══╝╚══╝  ╚═════╝   ╚═╝
-  Gowin Command Line Tools  v0.3
-"""
-
-# ---------------------------------------------------------------------------
-# Command implementations (also used by script runner)
-# ---------------------------------------------------------------------------
 
 def cmd_list_hw(gwct: GWCT):
     info = gwct.device_info
     print(f"\n  device    : {gwct.device_alias}  —  {info.get('desc', '(unknown)')}")
     print(f"  ofl board : {gwct.board}")
     print(f"  transport : {gwct.transport.describe()}")
-    # Try to read sysinfo registers
     try:
-        magic  = gwct.memrd(0x60000000)
-        mfg_a  = gwct.memrd(0x60000004)
-        mfg_b  = gwct.memrd(0x60000008)
-        ver    = gwct.memrd(0x6000000C)
+        magic   = gwct.memrd(0x60000000)
+        mfg_a   = gwct.memrd(0x60000004)
+        mfg_b   = gwct.memrd(0x60000008)
+        ver     = gwct.memrd(0x6000000C)
         mfg_str = (
             mfg_a.to_bytes(4, "big").decode("ascii", errors="replace") +
             mfg_b.to_bytes(4, "big").decode("ascii", errors="replace")
         )
-        ver_major = (ver >> 16) & 0xFFFF
-        ver_minor = (ver >> 8)  & 0xFF
-        ver_patch = (ver)       & 0xFF
+        ver_str = f"{(ver>>16)&0xFFFF}.{(ver>>8)&0xFF}.{ver&0xFF}"
         print(f"\n  sysinfo:")
-        print(f"    magic   : 0x{magic:08X}  {magic_ok}")
+        print(f"    magic   : 0x{magic:08X}  {'✓' if magic == 0xDEADBEEF else '✗'}")
         print(f"    mfg     : {mfg_str}")
-        print(f"    version : {ver_major}.{ver_minor}.{ver_patch}")
+        print(f"    version : {ver_str}")
     except Exception as e:
-        print(f"\n  sysinfo  : [error reading — {e}]")
+        print(f"\n  sysinfo  : [error — {e}]")
     print()
 
 
-def cmd_info(gwct: GWCT):
-    cmd_list_hw(gwct)
-
-
-def cmd_memrd(gwct: GWCT, parts: list):
-    addr  = parse_int(parts[1])
-    count = parse_int(parts[2]) if len(parts) >= 3 else 1
-    for i in range(count):
-        a   = addr + i * 4
-        val = gwct.memrd(a)
-        print(f"  0x{a:08X}  =>  0x{val:08X}  ({val})")
-
-
-def cmd_memwr(gwct: GWCT, parts: list):
-    addr = parse_int(parts[1])
-    data = parse_int(parts[2])
-    gwct.memwr(addr, data)
-    print(f"  0x{addr:08X}  <=  0x{data:08X}  OK")
-
-
-def cmd_dump(gwct: GWCT, parts: list):
-    addr  = parse_int(parts[1])
-    count = parse_int(parts[2])
-    wpl   = 4
-    for row in range(0, count, wpl):
-        ra    = addr + row * 4
-        words = []
-        for col in range(wpl):
-            if row + col < count:
-                words.append(f"{gwct.memrd(ra + col*4):08X}")
-            else:
-                words.append("        ")
-        print(f"  0x{ra:08X}:  {'  '.join(words)}")
-
-
-def cmd_load(gwct: GWCT, parts: list):
-    path = parts[1]
-    if not Path(path).exists():
-        print(f"  [error] file not found: {path}")
+def cmd_exec(parts: list):
+    """Run a host system command and stream its output."""
+    if len(parts) < 2:
+        print("  usage: exec <command> [args...]")
         return
-    size = Path(path).stat().st_size
-    print(f"  loading {path}  ({size:,} bytes)  board={gwct.board} ...")
-    result = gwct.load(path)
-    print_load_result(result)
-
-
-def cmd_watch(gwct: GWCT, parts: list):
-    addr     = parse_int(parts[1])
-    interval = int(parts[2]) / 1000.0 if len(parts) >= 3 else 0.5
-    print(f"  watching 0x{addr:08X} every {interval*1000:.0f} ms  (Ctrl-C to stop)\n")
-    prev = None
-    while True:
-        val     = gwct.memrd(addr)
-        ts      = time.strftime("%H:%M:%S")
-        marker  = "  ◄" if (prev is not None and val != prev) else ""
-        print(f"  [{ts}]  0x{addr:08X}  =>  0x{val:08X}  ({val}){marker}")
-        prev = val
-        time.sleep(interval)
-
-
-def cmd_reset(gwct: GWCT):
-    # Writes to the CPU reset register — adjust address to match your map
-    RESET_ADDR = 0x60000020
-    gwct.memwr(RESET_ADDR, 0x00000001)
-    print(f"  reset written to 0x{RESET_ADDR:08X}")
+    host_cmd = parts[1:]
+    try:
+        result = subprocess.run(
+            host_cmd,
+            text=True,
+            # Stream stdout/stderr directly to terminal
+            stdout=None,
+            stderr=None
+        )
+        if result.returncode != 0:
+            print(f"  [exec] exited with code {result.returncode}")
+    except FileNotFoundError:
+        print(f"  [exec] command not found: {host_cmd[0]}")
+    except Exception as e:
+        print(f"  [exec] error: {e}")
 
 
 def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
-    """
-    Parse and run one command line. Returns False if the shell should exit.
-    """
-    line  = line.strip()
+    line = line.strip()
     if not line or line.startswith("#"):
         return True
-
     if echo:
         print(f"gwct> {line}")
 
@@ -432,43 +449,82 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
             print("  usage: list hw")
 
     elif cmd == "info":
-        cmd_info(gwct)
+        cmd_list_hw(gwct)
 
     elif cmd == "memrd":
         if len(parts) < 2:
             print("  usage: memrd <addr> [count]")
         else:
-            cmd_memrd(gwct, parts)
+            addr  = parse_int(parts[1])
+            count = parse_int(parts[2]) if len(parts) >= 3 else 1
+            for i in range(count):
+                a   = addr + i * 4
+                val = gwct.memrd(a)
+                print(f"  0x{a:08X}  =>  0x{val:08X}  ({val})")
 
     elif cmd == "memwr":
         if len(parts) < 3:
             print("  usage: memwr <addr> <data>")
         else:
-            cmd_memwr(gwct, parts)
+            addr = parse_int(parts[1])
+            data = parse_int(parts[2])
+            gwct.memwr(addr, data)
+            print(f"  0x{addr:08X}  <=  0x{data:08X}  OK")
 
     elif cmd == "dump":
         if len(parts) < 3:
             print("  usage: dump <addr> <count>")
         else:
-            cmd_dump(gwct, parts)
+            addr  = parse_int(parts[1])
+            count = parse_int(parts[2])
+            for row in range(0, count, 4):
+                ra    = addr + row * 4
+                words = []
+                for col in range(4):
+                    if row + col < count:
+                        words.append(f"{gwct.memrd(ra + col*4):08X}")
+                    else:
+                        words.append("        ")
+                print(f"  0x{ra:08X}:  {'  '.join(words)}")
 
     elif cmd == "load":
         if len(parts) < 2:
             print("  usage: load <file.fs>")
         else:
-            cmd_load(gwct, parts)
+            path = parts[1]
+            if not Path(path).exists():
+                print(f"  [error] file not found: {path}")
+            else:
+                size = Path(path).stat().st_size
+                print(f"  loading {path}  ({size:,} bytes)  board={gwct.board} ...")
+                print_load_result(gwct.load(path))
 
     elif cmd == "watch":
         if len(parts) < 2:
             print("  usage: watch <addr> [interval_ms]")
         else:
+            addr     = parse_int(parts[1])
+            interval = int(parts[2]) / 1000.0 if len(parts) >= 3 else 0.5
+            print(f"  watching 0x{addr:08X} every {interval*1000:.0f} ms  (Ctrl-C to stop)\n")
+            prev = None
             try:
-                cmd_watch(gwct, parts)
+                while True:
+                    val    = gwct.memrd(addr)
+                    ts     = time.strftime("%H:%M:%S")
+                    marker = "  ◄" if (prev is not None and val != prev) else ""
+                    print(f"  [{ts}]  0x{addr:08X}  =>  0x{val:08X}  ({val}){marker}")
+                    prev = val
+                    time.sleep(interval)
             except KeyboardInterrupt:
                 print()
 
     elif cmd == "reset":
-        cmd_reset(gwct)
+        RESET_ADDR = 0x60000020
+        gwct.memwr(RESET_ADDR, 0x00000001)
+        print(f"  reset written to 0x{RESET_ADDR:08X}")
+
+    elif cmd == "exec":
+        cmd_exec(parts)
 
     elif cmd == "script":
         if len(parts) < 2:
@@ -495,7 +551,6 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
 
 
 def run_script(gwct: GWCT, path: str):
-    """Execute a .gwct script file line by line."""
     p = Path(path)
     if not p.exists():
         print(f"  [error] script not found: {path}")
@@ -506,17 +561,53 @@ def run_script(gwct: GWCT, path: str):
         if not line or line.startswith("#"):
             continue
         try:
-            keep_going = run_command(gwct, line, echo=True)
+            if not run_command(gwct, line, echo=True):
+                break
         except Exception as e:
             print(f"  [error] line {i}: {e}")
             break
-        if not keep_going:
-            break
 
 
 # ---------------------------------------------------------------------------
-# Shell main loop
+# Shell
 # ---------------------------------------------------------------------------
+
+HELP_TEXT = """
+Gowin Command Line Tools — commands:
+
+  -- memory --
+  memrd  <addr> [count]        read 32-bit word(s)
+  memwr  <addr> <data>         write 32-bit word
+  dump   <addr> <count>        hex dump (4 words/line)
+  watch  <addr> [interval_ms]  poll register until Ctrl-C
+
+  -- device --
+  list hw                      show device + sysinfo registers
+  info                         alias for list hw
+  load   <file.fs>             program FPGA bitstream         [tab complete]
+  reset                        soft reset via register write
+
+  -- shell --
+  exec   <cmd> [args...]       run a host system command      [tab complete]
+  script <file.gwct>           run a script file              [tab complete]
+  history                      show command history
+  reconnect                    reopen connection
+  help                         this message
+  quit / exit / q              exit
+
+Addresses: decimal or 0x hex.
+Tab completes commands, file paths (load/script), and executables (exec).
+"""
+
+BANNER = """
+   ██████╗ ██╗    ██╗ ██████╗████████╗
+  ██╔════╝ ██║    ██║██╔════╝╚══██╔══╝
+  ██║  ███╗██║ █╗ ██║██║        ██║
+  ██║   ██║██║███╗██║██║        ██║
+  ╚██████╔╝╚███╔███╔╝╚██████╗   ██║
+   ╚═════╝  ╚══╝╚══╝  ╚═════╝   ╚═╝
+  Gowin Command Line Tools  v0.4
+"""
 
 def run_shell(gwct: GWCT):
     print(BANNER)
@@ -524,12 +615,7 @@ def run_shell(gwct: GWCT):
     print(f"  transport : {gwct.transport.describe()}")
     print(f"\n  type 'help' for commands, 'list hw' to probe device\n")
 
-    # Persistent history
-    try:
-        readline.read_history_file(HISTORY_FILE)
-    except FileNotFoundError:
-        pass
-    readline.set_history_length(500)
+    setup_readline()
 
     while True:
         try:
@@ -542,15 +628,13 @@ def run_shell(gwct: GWCT):
             continue
 
         try:
-            keep_going = run_command(gwct, line)
+            if not run_command(gwct, line):
+                break
         except Exception as e:
             print(f"  [error] {e}")
-            keep_going = True
-
-        if not keep_going:
-            break
 
     readline.write_history_file(HISTORY_FILE)
+    print("[gwct] bye")
 
 
 # ---------------------------------------------------------------------------
@@ -567,21 +651,16 @@ def list_devices():
 
 
 def main():
-    p = argparse.ArgumentParser(
-        prog="gwct",
-        description="Gowin Command Line Tools"
-    )
+    p = argparse.ArgumentParser(prog="gwct", description="Gowin Command Line Tools")
     p.add_argument("--device", "-d", metavar="DEVICE",
-                   help="Target device alias (e.g. mega60, nano9k).  Use --list-devices to see all.")
+                   help="Target device alias (e.g. mega60, nano9k). Use --list-devices to see all.")
     p.add_argument("--list-devices", action="store_true",
                    help="List all known device aliases and exit")
     p.add_argument("--remote", metavar="HOST",
                    help="Connect to gwct_server at HOST instead of local UART")
     p.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT, metavar="PORT")
-    p.add_argument("--port", default=DEFAULT_UART_PORT,
-                   help="Local UART device path (local mode only)")
-    p.add_argument("--baud", type=int, default=DEFAULT_UART_BAUD,
-                   help="Local UART baud rate (local mode only)")
+    p.add_argument("--port", default=DEFAULT_UART_PORT, help="Local UART device path")
+    p.add_argument("--baud", type=int, default=DEFAULT_UART_BAUD, help="Local UART baud rate")
     args = p.parse_args()
 
     if args.list_devices:
@@ -593,7 +672,7 @@ def main():
 
     alias = args.device.lower()
     if alias not in DEVICE_MAP:
-        print(f"[gwct] unknown device '{alias}'. Known devices:")
+        print(f"[gwct] unknown device '{alias}'.")
         list_devices()
         sys.exit(1)
 
