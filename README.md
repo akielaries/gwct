@@ -32,7 +32,7 @@ access to your entire APB register map from a host shell
 ```
 gwct/
   rtl/
-    gwct_top.v          top-level wrapper - this is the only file you instantiate
+    gwct_top.v          top-level wrapper. this is the only file you instantiate
     gwct_uart.v         8N1 UART RX/TX with 3-stage metastability sync
     gwct_packet.v       11-byte request / 7-byte response framing FSM
     gwct_apb_master.v   APB3 SETUP/ACCESS master FSM
@@ -51,7 +51,7 @@ gwct/
 ### Step 1 - Add files to your project
 
 Add all four files from `rtl/` to your Gowin EDA project. They have no
-external IP dependencies - pure Verilog-2001.
+external IP dependencies... pure Verilog-2001.
 
 ### Step 2 - Instantiate gwct_top
 
@@ -60,17 +60,17 @@ framer, and APB master together internally.
 
 ```verilog
 gwct_top #(
-    .CLK_HZ (50_000_000),    // Hz - must match your HCLK
+    .CLK_HZ (50_000_000),    // Hz must match your HCLK
     .BAUD   (115_200)        // must match host tool setting
 ) gwct (
     .clk     (HCLK),
     .rstn    (hwRstn),
 
-    // Two UART pins - connect to a USB-UART adapter
+    // Two UART pins connect to a USB-UART adapter
     .gwct_rx (GWCT_RX),
     .gwct_tx (GWCT_TX),
 
-    // APB master bus signals - connect to your APB mux (see Step 3)
+    // APB master bus signals connect to your APB mux (see Step 3)
     .PADDR   (gwct_PADDR),
     .PSEL    (gwct_PSEL),
     .PENABLE (gwct_PENABLE),
@@ -79,7 +79,7 @@ gwct_top #(
     .PSTRB   (gwct_PSTRB),
     .PPROT   (gwct_PPROT),
 
-    // APB slave response - shared with CPU path
+    // APB slave response shared with CPU path
     .PRDATA  (slave_PRDATA),
     .PREADY  (slave_PREADY),
     .PSLVERR (slave_PSLVERR)
@@ -101,7 +101,7 @@ wire [31:0] gwct_PWDATA;
 wire [3:0]  gwct_PSTRB;
 wire [2:0]  gwct_PPROT;
 
-// Mux - GWCT wins when gwct_PSEL=1
+// Mux GWCT wins when gwct_PSEL=1
 wire mux_sel = gwct_PSEL;
 
 wire [31:0] mux_PADDR   = mux_sel ? gwct_PADDR   : cpu_PADDR;
@@ -115,12 +115,12 @@ wire [31:0] slave_PRDATA;
 wire        slave_PREADY;
 wire        slave_PSLVERR;
 
-// Feed slave response back to CPU - stall CPU while GWCT owns the bus
+// Feed slave response back to CPU stall CPU while GWCT owns the bus
 assign cpu_PRDATA  = slave_PRDATA;
 assign cpu_PREADY  = mux_sel ? 1'b0 : slave_PREADY;
 assign cpu_PSLVERR = slave_PSLVERR;
 
-// Your APB slave - connect the muxed signals
+// Your APB slave connect the muxed signals
 your_apb_slave slave (
     .PADDR   (mux_PADDR),
     .PSEL    (mux_PSEL),
