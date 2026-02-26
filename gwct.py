@@ -333,11 +333,23 @@ class RemoteTransport:
             print(f"  uploading... {pct:5.1f}%  ({sent:,}/{file_size:,} bytes)", end="\r")
         print()
 
-        # Wait for programming to complete - use long timeout
-        print("  programming... (waiting for openFPGALoader)")
-        resp_len_bytes = self._recv_exact(4, timeout=LOAD_TIMEOUT_S)
-        resp_len = struct.unpack(">I", resp_len_bytes)[0]
-        return json.loads(self._recv_exact(resp_len, timeout=LOAD_TIMEOUT_S).decode())
+        # Read streaming lines from openFPGALoader as they arrive.
+        # Protocol: [1-byte length][line bytes] repeated, then [0x00][4-byte rc].
+        print("  programming...")
+        self.sock.settimeout(LOAD_TIMEOUT_S)
+        try:
+            while True:
+                length_byte = self._recv_exact(1, timeout=LOAD_TIMEOUT_S)
+                length = length_byte[0]
+                if length == 0:
+                    # end of stream - read 4-byte signed return code
+                    rc_bytes = self._recv_exact(4, timeout=LOAD_TIMEOUT_S)
+                    rc = struct.unpack(">i", rc_bytes)[0]
+                    return {"returncode": rc, "stdout": "", "stderr": ""}
+                line = self._recv_exact(length, timeout=LOAD_TIMEOUT_S)
+                print(f"  {line.decode('utf-8', errors='replace')}")
+        finally:
+            self.sock.settimeout(TIMEOUT_S)
 
     def ping(self) -> bool:
         try:

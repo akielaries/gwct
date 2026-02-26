@@ -174,22 +174,34 @@ class GWCTServer:
                         f.write(data)
                         tmp = f.name
                     try:
-                        result = subprocess.run(
+                        # Stream openFPGALoader output line-by-line to client.
+                        # Protocol: each line is [1-byte length][line bytes].
+                        # End of stream: [0x00] followed by [4-byte returncode].
+                        proc = subprocess.Popen(
                             ["openFPGALoader", "-v", "-b", board, tmp],
-                            capture_output=True, text=True, timeout=120
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,   # merge stderr into stdout
+                            text=True,
+                            bufsize=1                   # line-buffered
                         )
-                        resp = json.dumps({
-                            "returncode": result.returncode,
-                            "stdout":     result.stdout,
-                            "stderr":     result.stderr
-                        }).encode()
-                        conn.sendall(struct.pack(">I", len(resp)) + resp)
-                        log.info(f"Programming done: rc={result.returncode}")
+                        for line in proc.stdout:
+                            line_bytes = line.rstrip("\n").encode("utf-8", errors="replace")
+                            # cap at 255 bytes per line
+                            line_bytes = line_bytes[:255]
+                            conn.sendall(bytes([len(line_bytes)]) + line_bytes)
+                        proc.wait(timeout=120)
+                        rc = proc.returncode
+                        # end-of-stream marker + return code
+                        conn.sendall(bytes([0x00]) + struct.pack(">i", rc))
+                        log.info(f"Programming done: rc={rc}")
                     except Exception as e:
-                        resp = json.dumps({"returncode": -1, "stdout": "", "stderr": str(e)}).encode()
-                        conn.sendall(struct.pack(">I", len(resp)) + resp)
+                        log.error(f"Programming error: {e}")
+                        err_line = str(e).encode("utf-8")[:255]
+                        conn.sendall(bytes([len(err_line)]) + err_line)
+                        conn.sendall(bytes([0x00]) + struct.pack(">i", -1))
                     finally:
-                        os.unlink(tmp)
+                        if os.path.exists(tmp):
+                            os.unlink(tmp)
 
                 # --------------------------------------------------------
                 # Ping
