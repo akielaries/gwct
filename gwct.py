@@ -334,18 +334,21 @@ class RemoteTransport:
         print()
 
         # Read streaming lines from openFPGALoader as they arrive.
-        # Protocol: [1-byte length][line bytes] repeated, then [0x00][4-byte rc].
+        # Protocol: [2-byte big-endian length][line bytes] repeated.
+        # End-of-stream: length=0xFFFF followed by [4-byte signed rc].
         print("  programming...")
         self.sock.settimeout(LOAD_TIMEOUT_S)
         try:
             while True:
-                length_byte = self._recv_exact(1, timeout=LOAD_TIMEOUT_S)
-                length = length_byte[0]
-                if length == 0:
+                hdr = self._recv_exact(2, timeout=LOAD_TIMEOUT_S)
+                length = struct.unpack(">H", hdr)[0]
+                if length == 0xFFFF:
                     # end of stream - read 4-byte signed return code
                     rc_bytes = self._recv_exact(4, timeout=LOAD_TIMEOUT_S)
                     rc = struct.unpack(">i", rc_bytes)[0]
                     return {"returncode": rc, "stdout": "", "stderr": ""}
+                if length == 0:
+                    continue  # empty line, skip
                 line = self._recv_exact(length, timeout=LOAD_TIMEOUT_S)
                 print(f"  {line.decode('utf-8', errors='replace')}")
         finally:

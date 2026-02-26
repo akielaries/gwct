@@ -174,31 +174,47 @@ class GWCTServer:
                         f.write(data)
                         tmp = f.name
                     try:
-                        # Stream openFPGALoader output line-by-line to client.
-                        # Protocol: each line is [1-byte length][line bytes].
-                        # End of stream: [0x00] followed by [4-byte returncode].
+                        # Stream openFPGALoader output to client line by line.
+                        #
+                        # Frame format: [2-byte big-endian length][line bytes]
+                        # End-of-stream: length=0xFFFF followed by [4-byte signed rc]
+                        #
+                        # We use 0xFFFF as sentinel (not 0x0000) so an empty line
+                        # can still be sent as length=0x0000 without confusion.
+                        # openFPGALoader uses \r for progress lines -- we split on
+                        # both \r and \n so progress bars flush immediately.
                         proc = subprocess.Popen(
                             ["openFPGALoader", "-v", "-b", board, tmp],
                             stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,   # merge stderr into stdout
-                            text=True,
-                            bufsize=1                   # line-buffered
+                            stderr=subprocess.STDOUT,
+                            bufsize=0   # unbuffered bytes
                         )
-                        for line in proc.stdout:
-                            line_bytes = line.rstrip("\n").encode("utf-8", errors="replace")
-                            # cap at 255 bytes per line
-                            line_bytes = line_bytes[:255]
-                            conn.sendall(bytes([len(line_bytes)]) + line_bytes)
+                        buf = b""
+                        while True:
+                            ch = proc.stdout.read(1)
+                            if not ch:
+                                break
+                            if ch in (b"\n", b"\r"):
+                                if buf:
+                                    line_bytes = buf[:65534]  # max fits in 2-byte length
+                                    conn.sendall(struct.pack(">H", len(line_bytes)) + line_bytes)
+                                    buf = b""
+                            else:
+                                buf += ch
+                        # flush any remaining partial line
+                        if buf:
+                            line_bytes = buf[:65534]
+                            conn.sendall(struct.pack(">H", len(line_bytes)) + line_bytes)
                         proc.wait(timeout=120)
                         rc = proc.returncode
-                        # end-of-stream marker + return code
-                        conn.sendall(bytes([0x00]) + struct.pack(">i", rc))
+                        # end-of-stream sentinel 0xFFFF + 4-byte signed return code
+                        conn.sendall(struct.pack(">H", 0xFFFF) + struct.pack(">i", rc))
                         log.info(f"Programming done: rc={rc}")
                     except Exception as e:
                         log.error(f"Programming error: {e}")
-                        err_line = str(e).encode("utf-8")[:255]
-                        conn.sendall(bytes([len(err_line)]) + err_line)
-                        conn.sendall(bytes([0x00]) + struct.pack(">i", -1))
+                        err_line = str(e).encode("utf-8")[:65534]
+                        conn.sendall(struct.pack(">H", len(err_line)) + err_line)
+                        conn.sendall(struct.pack(">H", 0xFFFF) + struct.pack(">i", -1))
                     finally:
                         if os.path.exists(tmp):
                             os.unlink(tmp)
