@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gwct - Gowin Command Line Tools
+gwct - Gowin Command Line Tool
 UART-based debug shell for Gowin FPGA / Cortex-M1 APB memory access.
 
 Two transport modes:
@@ -497,7 +497,7 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
             for i in range(count):
                 a   = addr + i * 4
                 val = gwct.memrd(a)
-                print(f"  0x{a:08X}  =>  0x{val:08X}  ({val})")
+                print(f"  0x{a:08X} :   0x{val:08X}  ({val})")
 
     elif cmd == "memwr":
         if len(parts) < 3:
@@ -506,7 +506,7 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
             addr = parse_int(parts[1])
             data = parse_int(parts[2])
             gwct.memwr(addr, data)
-            print(f"  0x{addr:08X}  <=  0x{data:08X}  OK")
+            print(f"  0x{addr:08X} :    0x{data:08X}  OK")
 
     elif cmd == "dump":
         if len(parts) < 3:
@@ -549,7 +549,7 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
                     val    = gwct.memrd(addr)
                     ts     = time.strftime("%H:%M:%S")
                     marker = "  #" if (prev is not None and val != prev) else ""
-                    print(f"  [{ts}]  0x{addr:08X}  =>  0x{val:08X}  ({val}){marker}")
+                    print(f"  [{ts}]  0x{addr:08X} :    0x{val:08X}  ({val}){marker}")
                     prev = val
                     time.sleep(interval)
             except KeyboardInterrupt:
@@ -610,7 +610,7 @@ def run_script(gwct: GWCT, path: str):
 # ---------------------------------------------------------------------------
 
 HELP_TEXT = """
-Gowin Command Line Tools - commands:
+Gowin Command Line Tool commands:
 
   -- memory --
   memrd  <addr> [count]        read 32-bit word(s)
@@ -637,7 +637,7 @@ Tab completes commands, file paths (load/script), and executables (exec).
 """
 
 BANNER = """
-  Gowin Command Line Tools  v0.4
+  Gowin Command Line Tool
   ==============================
 """
 
@@ -683,7 +683,7 @@ def list_devices():
 
 
 def main():
-    p = argparse.ArgumentParser(prog="gwct", description="Gowin Command Line Tools")
+    p = argparse.ArgumentParser(prog="gwct", description="Gowin Command Line Tool")
     p.add_argument("--device", "-d", metavar="DEVICE",
                    help="Target device alias (e.g. mega60, nano9k). Use --list-devices to see all.")
     p.add_argument("--list-devices", action="store_true",
