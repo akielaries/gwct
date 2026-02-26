@@ -1,3 +1,0 @@
-[console_scripts]
-gwct = gwct:main
-gwct_server = gwct_server:main

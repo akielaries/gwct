@@ -1,2 +1,0 @@
-gwct
-gwct_server
