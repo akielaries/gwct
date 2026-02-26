@@ -69,7 +69,7 @@ LOAD_TIMEOUT_S = 120.0  # bitstream transfer + programming
 
 HISTORY_FILE = Path.home() / ".gwct_history"
 
-# Commands that take a file path as their second token - used for tab completion
+# Commands that take a file path as their second token like used for tab completion
 FILE_COMMANDS = {"load", "script"}
 
 # All top-level commands - used for command completion
@@ -865,11 +865,21 @@ def main():
         help="Connect to gwct_server at HOST instead of local UART",
     )
     p.add_argument(
-        "--server-port", type=int, default=DEFAULT_SERVER_PORT, metavar="PORT"
+        "--server-port",
+        type=int,
+        default=DEFAULT_SERVER_PORT,
+        metavar="PORT",
     )
-    p.add_argument("--port", default=DEFAULT_UART_PORT, help="Local UART device path")
     p.add_argument(
-        "--baud", type=int, default=DEFAULT_UART_BAUD, help="Local UART baud rate"
+        "--port",
+        default=DEFAULT_UART_PORT,
+        help="Local UART device path",
+    )
+    p.add_argument(
+        "--baud",
+        type=int,
+        default=DEFAULT_UART_BAUD,
+        help="Local UART baud rate",
     )
     args = p.parse_args()
 
