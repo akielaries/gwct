@@ -10,13 +10,10 @@
 
 set base 0x60000000
 
-puts ""
-puts "hex dump:"
-puts [dump $base 8]
-
+puts [memrd $base]
 
 # load a bitstream...
-program ../mega_60k_test/impl/pnr/mega_60k_test.fs
+#program ../mega_60k_test/impl/pnr/mega_60k_test.fs
 
 puts ""
 puts "script done"
