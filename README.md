@@ -24,9 +24,16 @@ https://github.com/user-attachments/assets/e62e02b8-c00c-496a-98c0-45aa27fa334e
 - CLK_HZ parameter must match your actual clock frequency
 
 **Host tool**
+- python3-tk
 - Python 3.8+
 - pyserial
 - openFPGALoader (for `load` command only)
+
+## Build
+```
+$ pip3 install .
+```
+
 
 ---
 
