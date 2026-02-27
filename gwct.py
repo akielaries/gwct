@@ -69,10 +69,10 @@ LOAD_TIMEOUT_S      = 120.0  # bitstream transfer + programming
 
 HISTORY_FILE = Path.home() / ".gwct_history"
 
-FILE_COMMANDS = {"load", "script", "tcl"}
+FILE_COMMANDS = {"program", "script", "tcl"}
 
 ALL_COMMANDS = [
-    "memrd", "memwr", "dump", "load", "watch", "reset",
+    "memrd", "memwr", "dump", "program", "watch", "reset",
     "list", "info", "script", "tcl", "exec", "reconnect",
     "help", "quit", "exit",
 ]
@@ -229,10 +229,10 @@ def _make_tcl_interpreter(gwct_obj):
             lines.append(f"0x{ra:08X}:  {'  '.join(words)}")
         return "\n".join(lines)
 
-    def tcl_load(path_str):
+    def tcl_program(path_str):
         path = str(path_str)
         if not Path(path).exists():
-            raise tkinter.TclError(f"file not found: {path}")
+            raise Exception(f"file not found: {path}")
         size = Path(path).stat().st_size
         print(f"  loading {path}  ({size:,} bytes)  board={gwct_obj.board} ...")
         result = gwct_obj.load(path)
@@ -251,7 +251,7 @@ def _make_tcl_interpreter(gwct_obj):
     tcl.createcommand("mrd",          tcl_mrd)
     tcl.createcommand("mwr",          tcl_mwr)
     tcl.createcommand("dump",         tcl_dump)
-    tcl.createcommand("load_bitstream", tcl_load)
+    tcl.createcommand("program", tcl_program)
     tcl.createcommand("sleep_ms",     tcl_sleep)
     tcl.createcommand("gwct_version", tcl_gwct_version)
 
@@ -735,9 +735,9 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
             except Exception as e:
                 print(f"  [error] {e}")
 
-    elif cmd == "load":
+    elif cmd == "program":
         if len(parts) < 2:
-            print("  usage: load <file.fs>")
+            print("  usage: program <file.fs>")
         else:
             path = parts[1]
             if not Path(path).exists():
@@ -831,6 +831,7 @@ def run_script(gwct: GWCT, path: str):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
+        readline.add_history(line)
         try:
             if not run_command(gwct, line, echo=True):
                 break
@@ -861,7 +862,7 @@ Gowin Command Line Tool commands:
   -- device --
   list hw                      show device + sysinfo registers
   info                         alias for list hw
-  load   <file.fs>             program FPGA bitstream         [tab complete]
+  program <file.fs>            program FPGA bitstream         [tab complete]
   reset                        soft reset via register write
 
   -- scripting --
@@ -873,7 +874,7 @@ Gowin Command Line Tool commands:
     mrd  <addr>          read register, returns "0xXXXXXXXX"
     mwr  <addr> <data>   write register
     dump <addr> <count>  hex dump, returns string
-    load_bitstream <f>   program bitstream, returns 0/1
+    program <f>          program bitstream, returns 0/1
     sleep_ms <ms>        sleep
     memrd / memwr        aliases for mrd / mwr
 
@@ -918,7 +919,7 @@ def run_shell(gwct: GWCT):
             print(f"  [error] {e}")
 
     readline.write_history_file(HISTORY_FILE)
-    print("[gwct] bye")
+    print("[gwct] bye.....")
 
 
 # ---------------------------------------------------------------------------
