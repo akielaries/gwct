@@ -1,8 +1,7 @@
 # GWCT - Gowin Command Line Tool
 
-A lightweight UART-based debug interface for Gowin FPGAs. Add four small
-RTL files to your project, wire two UART pins, and get interactive read/write
-access to your entire APB register map from a host shell
+A lightweight UART-based debug interface for Gowin FPGAs and accessing ABP busses. This
+requires IO for TX and RX pins and takes up roughly 300 LUTs?
 
 ```
   Your laptop                    FPGA host machine               FPGA
@@ -37,128 +36,7 @@ $ pip3 install .
 
 ---
 
-## Project layout
-
-```
-gwct/
-  rtl/
-    gwct_top.v          top-level wrapper. this is the only file you instantiate
-    gwct_uart.v         8N1 UART RX/TX with 3-stage metastability sync
-    gwct_packet.v       11-byte request / 7-byte response framing FSM
-    gwct_apb_master.v   APB3 SETUP/ACCESS master FSM
-  host/
-    gwct.py             interactive debug shell (run this on your laptop)
-    gwct_server.py      optional server daemon for remote access
-  example/
-    example_top.v       complete worked example: GWCT + APB mux
-  README.md
-```
-
----
-
 ## RTL integration
-
-### Step 1 - Add files to your project
-
-Add all four files from `rtl/` to your Gowin EDA project. They have no
-external IP dependencies... pure Verilog-2001.
-
-### Step 2 - Instantiate gwct_top
-
-`gwct_top` is the only module you need to touch. It wires the UART, packet
-framer, and APB master together internally.
-
-```verilog
-gwct_top #(
-    .CLK_HZ (50_000_000),    // Hz must match your HCLK
-    .BAUD   (115_200)        // must match host tool setting
-) gwct (
-    .clk     (HCLK),
-    .rstn    (hwRstn),
-
-    // Two UART pins connect to a USB-UART adapter
-    .gwct_rx (GWCT_RX),
-    .gwct_tx (GWCT_TX),
-
-    // APB master bus signals connect to your APB mux (see Step 3)
-    .PADDR   (gwct_PADDR),
-    .PSEL    (gwct_PSEL),
-    .PENABLE (gwct_PENABLE),
-    .PWRITE  (gwct_PWRITE),
-    .PWDATA  (gwct_PWDATA),
-    .PSTRB   (gwct_PSTRB),
-    .PPROT   (gwct_PPROT),
-
-    // APB slave response shared with CPU path
-    .PRDATA  (slave_PRDATA),
-    .PREADY  (slave_PREADY),
-    .PSLVERR (slave_PSLVERR)
-);
-```
-
-### Step 3 - Add a 2-way APB mux
-
-GWCT is a second APB master alongside your Cortex-M1. You need a simple
-priority mux in front of your APB slave(s). GWCT gets the bus when it has
-an active transaction (gwct_PSEL=1), which lasts 3-4 APB clock cycles.
-During that window the CPU sees PREADY=0 and stalls harmlessly.
-
-```verilog
-// Declare GWCT APB wires
-wire [31:0] gwct_PADDR;
-wire        gwct_PSEL, gwct_PENABLE, gwct_PWRITE;
-wire [31:0] gwct_PWDATA;
-wire [3:0]  gwct_PSTRB;
-wire [2:0]  gwct_PPROT;
-
-// Mux GWCT wins when gwct_PSEL=1
-wire mux_sel = gwct_PSEL;
-
-wire [31:0] mux_PADDR   = mux_sel ? gwct_PADDR   : cpu_PADDR;
-wire        mux_PSEL    = mux_sel ? gwct_PSEL     : cpu_PSEL;
-wire        mux_PENABLE = mux_sel ? gwct_PENABLE  : cpu_PENABLE;
-wire        mux_PWRITE  = mux_sel ? gwct_PWRITE   : cpu_PWRITE;
-wire [31:0] mux_PWDATA  = mux_sel ? gwct_PWDATA   : cpu_PWDATA;
-
-// Slave response wires
-wire [31:0] slave_PRDATA;
-wire        slave_PREADY;
-wire        slave_PSLVERR;
-
-// Feed slave response back to CPU stall CPU while GWCT owns the bus
-assign cpu_PRDATA  = slave_PRDATA;
-assign cpu_PREADY  = mux_sel ? 1'b0 : slave_PREADY;
-assign cpu_PSLVERR = slave_PSLVERR;
-
-// Your APB slave connect the muxed signals
-your_apb_slave slave (
-    .PADDR   (mux_PADDR),
-    .PSEL    (mux_PSEL),
-    .PENABLE (mux_PENABLE),
-    .PWRITE  (mux_PWRITE),
-    .PWDATA  (mux_PWDATA),
-    .PRDATA  (slave_PRDATA),
-    .PREADY  (slave_PREADY),
-    .PSLVERR (slave_PSLVERR),
-    ...
-);
-```
-
-See `example/example_top.v` for a complete working (I think) example...
-
-### Step 4 - Pin constraints
-
-Add two entries to your `.cst` file. Pick any spare GPIO pins on your board:
-
-```
-IO_LOC "GWCT_RX" <pin>;
-IO_LOC "GWCT_TX" <pin>;
-IO_PORT "GWCT_RX" PULL_MODE=UP;
-IO_PORT "GWCT_TX" PULL_MODE=UP;
-```
-
-Connect those pins to a USB-UART adapter (CP2102, CH340, FTDI, etc.).
-Cross the wires: adapter TX -> GWCT_RX, adapter RX -> GWCT_TX.
 
 ---
 
