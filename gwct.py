@@ -36,12 +36,12 @@ from typing import Optional
 DEVICE_MAP = {
     "mega60": {"board": "tangconsole", "desc": "Tang Mega 60K  (GW5AT-60)"},
     "mega138": {"board": "tangconsole", "desc": "Tang Mega 138K (GW5AST-138)"},
-    "nano1k": {"board": "tangnano1k", "desc": "Tang Nano 1K   (GW1NZ-1)"},
-    "nano4k": {"board": "tangnano4k", "desc": "Tang Nano 4K   (GW1NSR-4C)"},
-    "nano9k": {"board": "tangnano9k", "desc": "Tang Nano 9K   (GW1NR-9)"},
-    "nano20k": {"board": "tangnano20k", "desc": "Tang Nano 20K  (GW2AR-18)"},
-    "primer20k": {"board": "tangprimer20k", "desc": "Tang Primer 20K (GW2A-18C)"},
-    "primer25k": {"board": "tangprimer25k", "desc": "Tang Primer 25K (GW5A-25)"},
+    "nano1": {"board": "tangnano1k", "desc": "Tang Nano 1K   (GW1NZ-1)"},
+    "nano4": {"board": "tangnano4k", "desc": "Tang Nano 4K   (GW1NSR-4C)"},
+    "nano9": {"board": "tangnano9k", "desc": "Tang Nano 9K   (GW1NR-9)"},
+    "nano20": {"board": "tangnano20k", "desc": "Tang Nano 20K  (GW2AR-18)"},
+    "primer20": {"board": "tangprimer20k", "desc": "Tang Primer 20K (GW2A-18C)"},
+    "primer25": {"board": "tangprimer25k", "desc": "Tang Primer 25K (GW5A-25)"},
 }
 
 # ---------------------------------------------------------------------------
@@ -56,6 +56,7 @@ RX_LEN = 7
 
 MSG_UART = 0x01
 MSG_LOAD = 0x10
+MSG_FLASH = 0x11
 MSG_PING = 0x20
 MSG_PONG = 0x21
 MSG_OK = 0xA0
@@ -69,13 +70,14 @@ LOAD_TIMEOUT_S = 120.0  # bitstream transfer + programming
 
 HISTORY_FILE = Path.home() / ".gwct_history"
 
-FILE_COMMANDS = {"program", "script", "tcl"}
+FILE_COMMANDS = {"program", "flash", "script", "tcl"}
 
 ALL_COMMANDS = [
     "memrd",
     "memwr",
     "dump",
     "program",
+    "flash",
     "watch",
     "reset",
     "list",
@@ -262,6 +264,16 @@ def _make_tcl_interpreter(gwct_obj):
         print_load_result(result)
         return "0" if result["returncode"] == 0 else "1"
 
+    def tcl_flash(path_str):
+        path = str(path_str)
+        if not Path(path).exists():
+            raise Exception(f"file not found: {path}")
+        size = Path(path).stat().st_size
+        print(f"  flashing {path}  ({size:,} bytes)  board={gwct_obj.board} ...")
+        result = gwct_obj.flash(path)
+        print_load_result(result)
+        return "0" if result["returncode"] == 0 else "1"
+
     def tcl_sleep(ms_str):
         ms = int(str(ms_str))
         time.sleep(ms / 1000.0)
@@ -275,6 +287,7 @@ def _make_tcl_interpreter(gwct_obj):
     tcl.createcommand("mwr", tcl_mwr)
     tcl.createcommand("dump", tcl_dump)
     tcl.createcommand("program", tcl_program)
+    tcl.createcommand("flash", tcl_flash)
     tcl.createcommand("sleep_ms", tcl_sleep)
     tcl.createcommand("gwct_version", tcl_gwct_version)
 
@@ -303,7 +316,7 @@ def run_tcl_file(gwct_obj, path: str):
     tcl = _make_tcl_interpreter(gwct_obj)
 
     if tcl is not None:
-        # Embedded path - full gwct integration
+        # Embedded path full gwct integration
         print(f"  running tcl: {path}")
         try:
             tcl.eval(p.read_text())
@@ -314,7 +327,7 @@ def run_tcl_file(gwct_obj, path: str):
             first_line = msg.split("\n")[0]
             print(f"  [tcl error] {first_line}")
     else:
-        # Fallback - try system tclsh, with a warning that mrd/mwr won't work
+        # Fallback try system tclsh, with a warning that mrd/mwr won't work
         _run_tcl_tclsh_fallback(path)
 
 
@@ -505,6 +518,20 @@ class LocalTransport:
             "stderr": result.stderr,
         }
 
+    def flash_bitstream(self, path: str, board: str) -> dict:
+        """Flash to SPI flash instead of SRAM."""
+        result = subprocess.run(
+            ["openFPGALoader", "-v", "-b", board, "-f", path],  # <-- Add -f flag
+            capture_output=True,
+            text=True,
+            timeout=240,  # Flash takes longer than SRAM programming
+        )
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
     def ping(self) -> bool:
         return True
 
@@ -598,6 +625,48 @@ class RemoteTransport:
         finally:
             self.sock.settimeout(TIMEOUT_S)
 
+    def flash_bitstream(self, path: str, board: str) -> dict:
+        data = Path(path).read_bytes()
+        board_enc = board.encode()
+        file_size = len(data)
+
+        # Send MSG_FLASH (new message type) instead of MSG_LOAD
+        self.sock.sendall(
+            bytes([MSG_FLASH])  # <-- New message type
+            + struct.pack(">I", file_size)
+            + bytes([len(board_enc)])
+            + board_enc
+        )
+
+        chunk_size = 65536
+        sent = 0
+        while sent < file_size:
+            chunk = data[sent : sent + chunk_size]
+            self.sock.sendall(chunk)
+            sent += len(chunk)
+            pct = sent / file_size * 100
+            print(
+                f"  uploading... {pct:5.1f}%  ({sent:,}/{file_size:,} bytes)", end="\r"
+            )
+        print()
+
+        print("  programming...")
+        self.sock.settimeout(LOAD_TIMEOUT_S)
+        try:
+            while True:
+                hdr = self._recv_exact(2, timeout=LOAD_TIMEOUT_S)
+                length = struct.unpack(">H", hdr)[0]
+                if length == 0xFFFF:
+                    rc_bytes = self._recv_exact(4, timeout=LOAD_TIMEOUT_S)
+                    rc = struct.unpack(">i", rc_bytes)[0]
+                    return {"returncode": rc, "stdout": "", "stderr": ""}
+                if length == 0:
+                    continue
+                line = self._recv_exact(length, timeout=LOAD_TIMEOUT_S)
+                print(f"  {line.decode('utf-8', errors='replace')}")
+        finally:
+            self.sock.settimeout(TIMEOUT_S)
+
     def ping(self) -> bool:
         try:
             self.sock.sendall(bytes([MSG_PING]))
@@ -644,6 +713,9 @@ class GWCT:
 
     def load(self, path: str) -> dict:
         return self.transport.load_bitstream(path, self.board)
+
+    def flash(self, path: str) -> dict:
+        return self.transport.flash_bitstream(path, self.board)
 
     def ping(self) -> bool:
         return self.transport.ping()
@@ -794,6 +866,20 @@ def run_command(gwct: GWCT, line: str, echo: bool = False) -> bool:
                 print(f"  loading {path}  ({size:,} bytes)  board={gwct.board} ...")
                 print_load_result(gwct.load(path))
 
+    elif cmd == "flash":
+        if len(parts) < 2:
+            print("  usage: flash <file.fs>")
+        else:
+            path = parts[1]
+            if not Path(path).exists():
+                print(f"  [error] file not found: {path}")
+            else:
+                size = Path(path).stat().st_size
+                print(f"  flashing {path}  ({size:,} bytes)  board={gwct.board} ...")
+                print(f"  [warning] this writing to SPI flash will take ~60 seconds")
+                result = gwct.flash(path)
+                print_load_result(result)
+
     elif cmd == "watch":
         if len(parts) < 2:
             print("  usage: watch <addr> [interval_ms]")
@@ -914,6 +1000,7 @@ Gowin Command Line Tool commands:
   list hw                      show device + sysinfo registers
   info                         alias for list hw
   program <file.fs>            program FPGA bitstream         [tab complete]
+  flash   <file.fs>            flash FPGA bitstream (SPI flash) [tab complete]
   reset                        soft reset via register write
 
   -- scripting --
@@ -926,6 +1013,7 @@ Gowin Command Line Tool commands:
     mwr  <addr> <data>   write register
     dump <addr> <count>  hex dump, returns string
     program <f>          program bitstream, returns 0/1
+    flash <f>            flash bitstream, returns 0/1
     sleep_ms <ms>        sleep
     memrd / memwr        aliases for mrd / mwr
 
