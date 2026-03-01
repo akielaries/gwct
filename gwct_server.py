@@ -34,6 +34,7 @@ log = logging.getLogger("gwct_server")
 # ---------------------------------------------------------------------------
 MSG_UART = 0x01  # raw UART transaction: send 11 bytes, recv 7 bytes
 MSG_LOAD = 0x10  # bitstream load
+MSG_FLASH = 0x11  # bitstream load
 MSG_PING = 0x20
 MSG_PONG = 0x21
 MSG_OK = 0xA0
@@ -195,6 +196,62 @@ class GWCTServer:
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
                             bufsize=0,  # unbuffered bytes
+                        )
+                        buf = b""
+                        while True:
+                            ch = proc.stdout.read(1)
+                            if not ch:
+                                break
+                            if ch in (b"\n", b"\r"):
+                                if buf:
+                                    line_bytes = buf[
+                                        :65534
+                                    ]  # max fits in 2-byte length
+                                    conn.sendall(
+                                        struct.pack(">H", len(line_bytes)) + line_bytes
+                                    )
+                                    buf = b""
+                            else:
+                                buf += ch
+                        # flush any remaining partial line
+                        if buf:
+                            line_bytes = buf[:65534]
+                            conn.sendall(
+                                struct.pack(">H", len(line_bytes)) + line_bytes
+                            )
+                        proc.wait(timeout=120)
+                        rc = proc.returncode
+                        # end-of-stream sentinel 0xFFFF + 4-byte signed return code
+                        conn.sendall(struct.pack(">H", 0xFFFF) + struct.pack(">i", rc))
+                        log.info(f"Programming done: rc={rc}")
+                    except Exception as e:
+                        log.error(f"Programming error: {e}")
+                        err_line = str(e).encode("utf-8")[:65534]
+                        conn.sendall(struct.pack(">H", len(err_line)) + err_line)
+                        conn.sendall(struct.pack(">H", 0xFFFF) + struct.pack(">i", -1))
+                    finally:
+                        if os.path.exists(tmp):
+                            os.unlink(tmp)
+
+                elif msg_type == MSG_FLASH:
+                    # Same as MSG_LOAD but with -f flag
+                    size_bytes = self._recv_exact(conn, 4)
+                    file_size = struct.unpack(">I", size_bytes)[0]
+                    board_len = self._recv_exact(conn, 1)[0]
+                    board = self._recv_exact(conn, board_len).decode()
+                    data = self._recv_exact(conn, file_size, timeout=180.0)  # Longer timeout
+
+                    log.info(f"Flashing {file_size} bytes, board={board}")
+
+                    with tempfile.NamedTemporaryFile(suffix=".fs", delete=False) as f:
+                        f.write(data)
+                        tmp = f.name
+                    try:
+                        proc = subprocess.Popen(
+                            ["openFPGALoader", "-v", "-b", board, "-f", tmp],  # <-- Add -f
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            bufsize=0,
                         )
                         buf = b""
                         while True:
