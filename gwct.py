@@ -54,13 +54,14 @@ CMD_ERROR = 0xFF
 TX_LEN = 11
 RX_LEN = 7
 
-MSG_UART = 0x01
-MSG_LOAD = 0x10
-MSG_FLASH = 0x11
-MSG_PING = 0x20
-MSG_PONG = 0x21
-MSG_OK = 0xA0
-MSG_ERR = 0xA1
+MSG_SELECT = 0x00  # device selection handshake (multi-device server)
+MSG_UART   = 0x01
+MSG_LOAD   = 0x10
+MSG_FLASH  = 0x11
+MSG_PING   = 0x20
+MSG_PONG   = 0x21
+MSG_OK     = 0xA0
+MSG_ERR    = 0xA1
 
 DEFAULT_UART_PORT = "/dev/gwct_port_2a881d3a6c78529c21dc0423699e6be3"
 DEFAULT_UART_BAUD = 115200
@@ -540,15 +541,27 @@ class LocalTransport:
 
 
 class RemoteTransport:
-    def __init__(self, host: str, port: int = DEFAULT_SERVER_PORT):
-        self.host = host
-        self.port = port
+    def __init__(self, host: str, port: int = DEFAULT_SERVER_PORT,
+                 device_name: str = None):
+        self.host        = host
+        self.port        = port
+        self.device_name = device_name
         self.sock: Optional[socket.socket] = None
 
     def connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.settimeout(TIMEOUT_S)
         self.sock.connect((self.host, self.port))
+        if self.device_name:
+            self._select_device(self.device_name)
+
+    def _select_device(self, name: str):
+        name_enc = name.encode()
+        self.sock.sendall(bytes([MSG_SELECT, len(name_enc)]) + name_enc)
+        status = self._recv_exact(1)[0]
+        if status != MSG_OK:
+            err = self._recv_exact(64).rstrip(b"\x00").decode(errors="replace")
+            raise RuntimeError(f"Device selection failed: {err}")
 
     def disconnect(self):
         if self.sock:
@@ -675,6 +688,8 @@ class RemoteTransport:
             return False
 
     def describe(self) -> str:
+        if self.device_name:
+            return f"remote {self.host}:{self.port} [{self.device_name}]"
         return f"remote {self.host}:{self.port}"
 
 
@@ -1116,16 +1131,21 @@ def main():
         p.error("--device is required. Use --list-devices to see options.")
 
     alias = args.device.lower()
-    if alias not in DEVICE_MAP:
-        print(f"[gwct] unknown device '{alias}'.")
-        list_devices()
-        sys.exit(1)
 
-    transport = (
-        RemoteTransport(args.remote, args.server_port)
-        if args.remote
-        else LocalTransport(args.port, args.baud)
-    )
+    if args.remote:
+        # In remote mode the server validates the device name; DEVICE_MAP is
+        # only needed for local board lookups.  Warn if it's unknown locally.
+        if alias not in DEVICE_MAP:
+            print(f"[gwct] note: '{alias}' not in local device map — "
+                  f"server will validate.")
+        transport = RemoteTransport(args.remote, args.server_port,
+                                    device_name=alias)
+    else:
+        if alias not in DEVICE_MAP:
+            print(f"[gwct] unknown device '{alias}'.")
+            list_devices()
+            sys.exit(1)
+        transport = LocalTransport(args.port, args.baud)
 
     gwct_inst = GWCT(transport, alias)
     try:

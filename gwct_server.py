@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
 gwct_server.py — GWCT server daemon
-Runs on the machine physically connected to the FPGA.
-Exposes two services on a single TCP port via a message-type prefix byte:
+Runs on the machine physically connected to the FPGA(s).
+Exposes services on a single TCP port via a message-type prefix byte:
 
-  MSG_MEMRD  = 0x01  — forward a GWCT UART packet, return 7-byte response
-  MSG_MEMWR  = 0x02  — same
-  MSG_LOAD   = 0x10  — receive bitstream, invoke openFPGALoader, return JSON result
+  MSG_SELECT = 0x00  — select device by name (required first when multi-device)
+  MSG_UART   = 0x01  — forward a GWCT UART packet, return 7-byte response
+  MSG_LOAD   = 0x10  — receive bitstream, invoke openFPGALoader, return output
+  MSG_FLASH  = 0x11  — same as MSG_LOAD but writes to SPI flash (-f flag)
   MSG_PING   = 0x20  — connectivity check, returns MSG_PONG
 
-All messages start with a 1-byte type. The server is single-threaded per
-connection to avoid UART contention.
+All messages start with a 1-byte type.
+
+Multi-device usage:
+  gwct_server --config devices.json
+
+Single-device usage (backward compatible):
+  gwct_server --board tangnano20k --uart /dev/ttyUSB0 [--ftdi-serial SERIAL]
 """
 
 import argparse
@@ -32,33 +38,34 @@ log = logging.getLogger("gwct_server")
 # ---------------------------------------------------------------------------
 # Message types
 # ---------------------------------------------------------------------------
-MSG_UART = 0x01  # raw UART transaction: send 11 bytes, recv 7 bytes
-MSG_LOAD = 0x10  # bitstream load
-MSG_FLASH = 0x11  # bitstream load
-MSG_PING = 0x20
-MSG_PONG = 0x21
-MSG_OK = 0xA0
-MSG_ERR = 0xA1
+MSG_SELECT = 0x00  # device selection handshake (multi-device)
+MSG_UART   = 0x01  # raw UART transaction: send 11 bytes, recv 7 bytes
+MSG_LOAD   = 0x10  # bitstream load
+MSG_FLASH  = 0x11  # bitstream flash (SPI)
+MSG_PING   = 0x20
+MSG_PONG   = 0x21
+MSG_OK     = 0xA0
+MSG_ERR    = 0xA1
 
 # UART framing constants (must match gwct_packet.v)
-UART_TX_LEN = 11
-UART_RX_LEN = 7
+UART_TX_LEN  = 11
+UART_RX_LEN  = 7
 UART_TIMEOUT = 2.0
 
-DEFAULT_UART_PORT = "/dev/gwct_port_2a881d3a6c78529c21dc0423699e6be3"
-DEFAULT_UART_BAUD = 115200
-DEFAULT_BOARD = "tangnano20k"
-SERVER_HOST = "0.0.0.0"
-SERVER_PORT = 65432
+DEFAULT_UART_PORT  = "/dev/gwct_port_2a881d3a6c78529c21dc0423699e6be3"
+DEFAULT_UART_BAUD  = 115200
+DEFAULT_BOARD      = "tangnano20k"
+SERVER_HOST        = "0.0.0.0"
+SERVER_PORT        = 65432
 
 
 class UARTBridge:
-    """Thread-safe wrapper around the FPGA UART..."""
+    """Thread-safe wrapper around the FPGA UART."""
 
     def __init__(self, port: str, baud: int):
         self.port = port
         self.baud = baud
-        self.ser = None
+        self.ser  = None
         self.lock = threading.Lock()
 
     def open(self):
@@ -96,38 +103,87 @@ class UARTBridge:
             return raw
 
 
+def _ofl_cmd(board: str, ftdi_serial: str | None, bitfile: str, flash: bool) -> list[str]:
+    """Build an openFPGALoader command list."""
+    cmd = ["openFPGALoader", "-v", "-b", board]
+    if ftdi_serial:
+        cmd += ["--ftdi-serial", ftdi_serial]
+    if flash:
+        cmd += ["-f"]
+    cmd += [bitfile]
+    return cmd
+
+
+def _stream_programmer(conn: socket.socket, cmd: list[str], timeout: float = 120.0):
+    """Run cmd, stream its output to conn, send end-of-stream sentinel."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
+    buf = b""
+    while True:
+        ch = proc.stdout.read(1)
+        if not ch:
+            break
+        if ch in (b"\n", b"\r"):
+            if buf:
+                line = buf[:65534]
+                conn.sendall(struct.pack(">H", len(line)) + line)
+                buf = b""
+        else:
+            buf += ch
+    if buf:
+        line = buf[:65534]
+        conn.sendall(struct.pack(">H", len(line)) + line)
+    proc.wait(timeout=timeout)
+    conn.sendall(struct.pack(">H", 0xFFFF) + struct.pack(">i", proc.returncode))
+    log.info(f"openFPGALoader done: rc={proc.returncode}")
+
+
 class GWCTServer:
-    def __init__(
-        self,
-        uart_port=DEFAULT_UART_PORT,
-        uart_baud=DEFAULT_UART_BAUD,
-        board=DEFAULT_BOARD,
-        host=SERVER_HOST,
-        port=SERVER_PORT,
-    ):
-        self.uart = UARTBridge(uart_port, uart_baud)
-        self.board = board
-        self.host = host
-        self.port = port
+    def __init__(self, devices: dict, host: str = SERVER_HOST, port: int = SERVER_PORT):
+        """
+        devices — mapping of device name to device config dict:
+            {
+                "name1": {
+                    "uart":         UARTBridge,
+                    "board":        str,        # openFPGALoader board name
+                    "ftdi_serial":  str | None, # optional FTDI serial for disambiguation
+                },
+                ...
+            }
+        """
+        self.devices = devices
+        self.host    = host
+        self.port    = port
 
     def start(self):
-        self.uart.open()
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
-            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind((self.host, self.port))
-            srv.listen(5)
-            log.info(f"GWCT server listening on {self.host}:{self.port}")
-            while True:
-                try:
-                    conn, addr = srv.accept()
-                    t = threading.Thread(
-                        target=self._handle, args=(conn, addr), daemon=True
-                    )
-                    t.start()
-                except KeyboardInterrupt:
-                    log.info("Shutting down")
-                    break
-        self.uart.close()
+        for name, dev in self.devices.items():
+            dev["uart"].open()
+            log.info(f"Device '{name}': board={dev['board']}, ftdi_serial={dev['ftdi_serial']!r}")
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind((self.host, self.port))
+                srv.listen(5)
+                log.info(f"GWCT server listening on {self.host}:{self.port} "
+                         f"({len(self.devices)} device(s): {', '.join(self.devices)})")
+                while True:
+                    try:
+                        conn, addr = srv.accept()
+                        t = threading.Thread(
+                            target=self._handle, args=(conn, addr), daemon=True
+                        )
+                        t.start()
+                    except KeyboardInterrupt:
+                        log.info("Shutting down")
+                        break
+        finally:
+            for dev in self.devices.values():
+                dev["uart"].close()
 
     def _recv_exact(self, conn: socket.socket, n: int, timeout: float = 30.0) -> bytes:
         buf = b""
@@ -143,87 +199,92 @@ class GWCTServer:
     def _handle(self, conn: socket.socket, addr):
         log.info(f"Connection from {addr}")
         try:
-            while True:
-                # Each message starts with a 1-byte type
-                hdr = conn.recv(1)
-                if not hdr:
-                    break
-                msg_type = hdr[0]
+            # ----------------------------------------------------------------
+            # Device selection handshake
+            # ----------------------------------------------------------------
+            hdr = conn.recv(1)
+            if not hdr:
+                return
+            first_byte = hdr[0]
 
-                # --------------------------------------------------------
-                # UART transaction — forward packet to FPGA, return response
-                # --------------------------------------------------------
+            if first_byte == MSG_SELECT:
+                name_len = self._recv_exact(conn, 1)[0]
+                name = self._recv_exact(conn, name_len).decode()
+                if name not in self.devices:
+                    available = ", ".join(self.devices)
+                    msg = f"unknown device '{name}'; available: {available}"
+                    conn.sendall(bytes([MSG_ERR]) + msg.encode()[:64])
+                    log.warning(f"{addr}: {msg}")
+                    return
+                device = self.devices[name]
+                conn.sendall(bytes([MSG_OK]))
+                log.info(f"{addr}: selected device '{name}'")
+                pending = None
+            else:
+                # No MSG_SELECT — only valid when exactly one device is configured.
+                if len(self.devices) != 1:
+                    msg = b"MSG_SELECT required when multiple devices are configured"
+                    conn.sendall(bytes([MSG_ERR]) + msg[:64])
+                    return
+                device  = next(iter(self.devices.values()))
+                pending = first_byte  # process this byte as the first msg_type
+
+            uart        = device["uart"]
+            board       = device["board"]
+            ftdi_serial = device["ftdi_serial"]
+
+            # ----------------------------------------------------------------
+            # Main message loop
+            # ----------------------------------------------------------------
+            while True:
+                if pending is not None:
+                    msg_type = pending
+                    pending  = None
+                else:
+                    hdr = conn.recv(1)
+                    if not hdr:
+                        break
+                    msg_type = hdr[0]
+
+                # ------------------------------------------------------------
+                # UART transaction
+                # ------------------------------------------------------------
                 if msg_type == MSG_UART:
                     pkt = self._recv_exact(conn, UART_TX_LEN)
                     try:
-                        resp = self.uart.transact(pkt)
+                        resp = uart.transact(pkt)
                         conn.sendall(bytes([MSG_OK]) + resp)
                     except Exception as e:
                         log.error(f"UART error: {e}")
                         conn.sendall(bytes([MSG_ERR]) + str(e).encode()[:64])
 
-                # --------------------------------------------------------
-                # Bitstream load
-                # --------------------------------------------------------
-                elif msg_type == MSG_LOAD:
-                    # 4-byte file size
-                    size_bytes = self._recv_exact(conn, 4)
-                    file_size = struct.unpack(">I", size_bytes)[0]
+                # ------------------------------------------------------------
+                # Bitstream load / flash
+                # ------------------------------------------------------------
+                elif msg_type in (MSG_LOAD, MSG_FLASH):
+                    flash = (msg_type == MSG_FLASH)
 
-                    # 1-byte board string length + board string
+                    # Receive file size
+                    file_size = struct.unpack(">I", self._recv_exact(conn, 4))[0]
+
+                    # Receive board hint from client (kept for protocol compat;
+                    # we use the server-configured board instead).
                     board_len = self._recv_exact(conn, 1)[0]
-                    board = self._recv_exact(conn, board_len).decode()
+                    _client_board = self._recv_exact(conn, board_len).decode()
 
-                    # bitstream data — large transfer, use generous timeout
-                    data = self._recv_exact(conn, file_size, timeout=120.0)
-                    log.info(f"Received {file_size} bytes, board={board}")
+                    # Receive bitstream data
+                    recv_timeout = 180.0 if flash else 120.0
+                    data = self._recv_exact(conn, file_size, timeout=recv_timeout)
+                    log.info(f"{'Flash' if flash else 'Load'} {file_size} bytes "
+                             f"board={board} ftdi_serial={ftdi_serial!r}")
 
                     with tempfile.NamedTemporaryFile(suffix=".fs", delete=False) as f:
                         f.write(data)
                         tmp = f.name
                     try:
-                        # Stream openFPGALoader output to client line by line.
-                        #
-                        # Frame format: [2-byte big-endian length][line bytes]
-                        # End-of-stream: length=0xFFFF followed by [4-byte signed rc]
-                        #
-                        # We use 0xFFFF as sentinel (not 0x0000) so an empty line
-                        # can still be sent as length=0x0000 without confusion.
-                        # openFPGALoader uses \r for progress lines -- we split on
-                        # both \r and \n so progress bars flush immediately.
-                        proc = subprocess.Popen(
-                            ["openFPGALoader", "-v", "-b", board, tmp],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            bufsize=0,  # unbuffered bytes
-                        )
-                        buf = b""
-                        while True:
-                            ch = proc.stdout.read(1)
-                            if not ch:
-                                break
-                            if ch in (b"\n", b"\r"):
-                                if buf:
-                                    line_bytes = buf[
-                                        :65534
-                                    ]  # max fits in 2-byte length
-                                    conn.sendall(
-                                        struct.pack(">H", len(line_bytes)) + line_bytes
-                                    )
-                                    buf = b""
-                            else:
-                                buf += ch
-                        # flush any remaining partial line
-                        if buf:
-                            line_bytes = buf[:65534]
-                            conn.sendall(
-                                struct.pack(">H", len(line_bytes)) + line_bytes
-                            )
-                        proc.wait(timeout=120)
-                        rc = proc.returncode
-                        # end-of-stream sentinel 0xFFFF + 4-byte signed return code
-                        conn.sendall(struct.pack(">H", 0xFFFF) + struct.pack(">i", rc))
-                        log.info(f"Programming done: rc={rc}")
+                        cmd = _ofl_cmd(board, ftdi_serial, tmp, flash)
+                        log.info(f"Running: {' '.join(cmd)}")
+                        _stream_programmer(conn, cmd, timeout=recv_timeout)
                     except Exception as e:
                         log.error(f"Programming error: {e}")
                         err_line = str(e).encode("utf-8")[:65534]
@@ -233,70 +294,14 @@ class GWCTServer:
                         if os.path.exists(tmp):
                             os.unlink(tmp)
 
-                elif msg_type == MSG_FLASH:
-                    # Same as MSG_LOAD but with -f flag
-                    size_bytes = self._recv_exact(conn, 4)
-                    file_size = struct.unpack(">I", size_bytes)[0]
-                    board_len = self._recv_exact(conn, 1)[0]
-                    board = self._recv_exact(conn, board_len).decode()
-                    data = self._recv_exact(conn, file_size, timeout=180.0)  # Longer timeout
-
-                    log.info(f"Flashing {file_size} bytes, board={board}")
-
-                    with tempfile.NamedTemporaryFile(suffix=".fs", delete=False) as f:
-                        f.write(data)
-                        tmp = f.name
-                    try:
-                        proc = subprocess.Popen(
-                            ["openFPGALoader", "-v", "-b", board, "-f", tmp],  # <-- Add -f
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            bufsize=0,
-                        )
-                        buf = b""
-                        while True:
-                            ch = proc.stdout.read(1)
-                            if not ch:
-                                break
-                            if ch in (b"\n", b"\r"):
-                                if buf:
-                                    line_bytes = buf[
-                                        :65534
-                                    ]  # max fits in 2-byte length
-                                    conn.sendall(
-                                        struct.pack(">H", len(line_bytes)) + line_bytes
-                                    )
-                                    buf = b""
-                            else:
-                                buf += ch
-                        # flush any remaining partial line
-                        if buf:
-                            line_bytes = buf[:65534]
-                            conn.sendall(
-                                struct.pack(">H", len(line_bytes)) + line_bytes
-                            )
-                        proc.wait(timeout=120)
-                        rc = proc.returncode
-                        # end-of-stream sentinel 0xFFFF + 4-byte signed return code
-                        conn.sendall(struct.pack(">H", 0xFFFF) + struct.pack(">i", rc))
-                        log.info(f"Programming done: rc={rc}")
-                    except Exception as e:
-                        log.error(f"Programming error: {e}")
-                        err_line = str(e).encode("utf-8")[:65534]
-                        conn.sendall(struct.pack(">H", len(err_line)) + err_line)
-                        conn.sendall(struct.pack(">H", 0xFFFF) + struct.pack(">i", -1))
-                    finally:
-                        if os.path.exists(tmp):
-                            os.unlink(tmp)
-
-                # --------------------------------------------------------
+                # ------------------------------------------------------------
                 # Ping
-                # --------------------------------------------------------
+                # ------------------------------------------------------------
                 elif msg_type == MSG_PING:
                     conn.sendall(bytes([MSG_PONG]))
 
                 else:
-                    log.warning(f"Unknown message type: 0x{msg_type:02X}")
+                    log.warning(f"Unknown message type from {addr}: 0x{msg_type:02X}")
                     break
 
         except Exception as e:
@@ -306,23 +311,91 @@ class GWCTServer:
             log.info(f"Disconnected {addr}")
 
 
+def _load_config(path: str) -> tuple[dict, str, int]:
+    """
+    Parse a JSON config file and return (devices, host, port).
+
+    Expected format:
+    {
+        "host": "0.0.0.0",   (optional)
+        "port": 65432,        (optional)
+        "devices": [
+            {
+                "name":        "mega138",
+                "board":       "tangconsole",
+                "uart":        "/dev/ttyUSB0",
+                "baud":        115200,          (optional, default 115200)
+                "ftdi_serial": "2025030317"     (optional)
+            },
+            ...
+        ]
+    }
+    """
+    raw = json.loads(Path(path).read_text())
+    host = raw.get("host", SERVER_HOST)
+    port = raw.get("port", SERVER_PORT)
+
+    devices = {}
+    for entry in raw["devices"]:
+        name = entry["name"]
+        if name in devices:
+            raise ValueError(f"Duplicate device name in config: '{name}'")
+        devices[name] = {
+            "uart":        UARTBridge(entry["uart"], entry.get("baud", DEFAULT_UART_BAUD)),
+            "board":       entry["board"],
+            "ftdi_serial": entry.get("ftdi_serial"),
+        }
+    return devices, host, port
+
+
 def main():
-    p = argparse.ArgumentParser(description="GWCT server")
-    p.add_argument("--uart", default=DEFAULT_UART_PORT, help="UART device")
-    p.add_argument("--baud", type=int, default=DEFAULT_UART_BAUD)
-    p.add_argument("--board", default=DEFAULT_BOARD, help="openFPGALoader board type")
+    p = argparse.ArgumentParser(
+        description="GWCT server — single or multi-device mode",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Multi-device (config file):\n"
+            "  gwct_server --config devices.json\n\n"
+            "Single-device (command-line args):\n"
+            "  gwct_server --board tangnano20k --uart /dev/ttyUSB0\n"
+            "  gwct_server --board tangconsole  --uart /dev/ttyUSB0 --ftdi-serial 2025030317\n"
+        ),
+    )
+    p.add_argument("--config", metavar="FILE",
+                   help="JSON config file for multi-device mode")
+
+    # Single-device arguments (used when --config is not given)
+    p.add_argument("--uart",        default=DEFAULT_UART_PORT, help="UART device path")
+    p.add_argument("--baud",        type=int, default=DEFAULT_UART_BAUD, help="UART baud rate")
+    p.add_argument("--board",       default=DEFAULT_BOARD, help="openFPGALoader board name")
+    p.add_argument("--ftdi-serial", metavar="SERIAL",
+                   help="FTDI serial number passed to openFPGALoader (--ftdi-serial)")
+
+    # Network
     p.add_argument("--host", default=SERVER_HOST)
     p.add_argument("--port", type=int, default=SERVER_PORT)
+
     args = p.parse_args()
 
-    server = GWCTServer(
-        uart_port=args.uart,
-        uart_baud=args.baud,
-        board=args.board,
-        host=args.host,
-        port=args.port,
-    )
-    server.start()
+    if args.config:
+        try:
+            devices, host, port = _load_config(args.config)
+        except Exception as e:
+            p.error(f"Failed to load config '{args.config}': {e}")
+        # Command-line --host/--port override config file values
+        host = args.host if args.host != SERVER_HOST else host
+        port = args.port if args.port != SERVER_PORT else port
+    else:
+        devices = {
+            "default": {
+                "uart":        UARTBridge(args.uart, args.baud),
+                "board":       args.board,
+                "ftdi_serial": args.ftdi_serial,
+            }
+        }
+        host = args.host
+        port = args.port
+
+    GWCTServer(devices, host, port).start()
 
 
 if __name__ == "__main__":
