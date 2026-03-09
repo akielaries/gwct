@@ -1,0 +1,26 @@
+{
+    "host": "0.0.0.0",
+    "port": 65432,
+    "devices": [
+        {
+            "name":        "mega138k",
+            "board":       "tangconsole",
+            "uart":        "/dev/gwct_mega138k",
+            "baud":        115200,
+            "ftdi_serial": "2025030317"
+        },
+        {
+            "name":  "mega60k",
+            "board": "tangconsole",
+            "uart":  "/dev/gwct_mega60k",
+            "baud":  115200
+        },
+        {
+            "name":  "nano9k",
+            "board": "tangnano9k",
+            "uart":  "/dev/gwct_nano9k",
+            "baud":  115200
+        }
+    ]
+}
+
