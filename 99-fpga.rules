@@ -1,0 +1,58 @@
+# /etc/udev/rules.d/99-fpga.rules
+#
+# Stable symlinks for FPGA development devices on this Raspberry Pi.
+#
+# Boards managed:
+#   mega138k  — Tang Mega 138K  (GW5AST-138)
+#   mega60k   — Tang Mega 60K   (GW5AT-60)
+#   nano9k    — Tang Nano 9K    (GW1NR-9)
+#
+# "cm1_*" ports are the Cortex-M1 softcore debug UART on each FPGA.
+# "gwct_*" ports are the GWCT APB-over-UART ports used by gwct_server.
+# "jtag_*" ports are the tty face of the JTAG programmer (FT2232 iface A).
+#
+# Deploy:
+#   sudo cp 99-fpga.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+#
+
+# ── GWCT UART ports ──────────────────────────────────────────────────────────
+
+SUBSYSTEM=="tty", ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1.4:1.0", SYMLINK+="gwct_mega138k"
+SUBSYSTEM=="tty", ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2.1:1.0", SYMLINK+="gwct_mega60k"
+SUBSYSTEM=="tty", ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2.3:1.0", SYMLINK+="gwct_nano9k"
+
+# ── Cortex-M1 softcore debug UART ports ──────────────────────────────────────
+# mega138k: Pi hardware UART (GPIO 14/15), mapped to ttyS0 by the Pi bootloader.
+
+SUBSYSTEM=="tty", KERNEL=="ttyS0",                                                                             SYMLINK+="cm1_mega138k"
+SUBSYSTEM=="tty", ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2.2:1.0", SYMLINK+="cm1_mega60k"
+SUBSYSTEM=="tty", ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2.4:1.0", SYMLINK+="cm1_nano9k"
+
+# ── JTAG programmer tty interfaces ───────────────────────────────────────────
+# Sipeed USB Debugger (FT2232H) for mega138k.
+# iface A (if00) appears as a tty but is claimed by openFPGALoader via libusb.
+# iface B (if01) is the secondary UART — not currently in use.
+#
+# openFPGALoader selects this adapter with: --ftdi-serial 2025030317
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTRS{serial}=="2025030317", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="jtag_mega138k"
+
+# TODO: add jtag_mega60k once the FT2232 serial for the 60k programmer is known.
+#   Run on the Pi: udevadm info -a /sys/bus/usb/devices/1-1.3 | grep serial
+#   Then add a rule matching ATTRS{serial}=="<serial>", ENV{ID_USB_INTERFACE_NUM}=="00"
+
+# ── Black Magic Probe ────────────────────────────────────────────────────────
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6018", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="bmp_gdb"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6018", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="bmp_uart"
+
+# ── USB device access permissions ─────────────────────────────────────────────
+# FT2232 — used by openFPGALoader via libusb (no kernel driver needed)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", MODE="0666", GROUP="plugdev"
+
+# CH340 serial converters (gwct + CM1 debug ports)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE="0666", GROUP="plugdev"
+
+# Black Magic Probe
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6018", MODE="0666", GROUP="plugdev"
