@@ -103,10 +103,34 @@ class UARTBridge:
             return raw
 
 
-def _ofl_cmd(board: str, ftdi_serial: str | None, bitfile: str, flash: bool) -> list[str]:
+def _resolve_busdev(jtag_devpath: str) -> str | None:
+    """Resolve a stable USB devpath (e.g. '1-1.4') to 'busnum:devaddr'.
+
+    Reads /sys/bus/usb/devices/<devpath>/{busnum,devnum} which are stable
+    for a given physical USB port even though devnum can change across
+    reboots.  Returns e.g. '001:086' or None if the device is missing.
+    """
+    base = f"/sys/bus/usb/devices/{jtag_devpath}"
+    try:
+        busnum = int(Path(f"{base}/busnum").read_text().strip())
+        devnum = int(Path(f"{base}/devnum").read_text().strip())
+        return f"{busnum:03d}:{devnum:03d}"
+    except (FileNotFoundError, ValueError) as e:
+        log.warning(f"Cannot resolve JTAG devpath '{jtag_devpath}': {e}")
+        return None
+
+
+def _ofl_cmd(board: str, ftdi_serial: str | None, bitfile: str, flash: bool,
+             jtag_devpath: str | None = None) -> list[str]:
     """Build an openFPGALoader command list."""
     cmd = ["openFPGALoader", "-v", "-b", board]
-    if ftdi_serial:
+    if jtag_devpath:
+        busdev = _resolve_busdev(jtag_devpath)
+        if busdev:
+            cmd += ["--busdev-num", busdev]
+        else:
+            log.warning(f"JTAG devpath '{jtag_devpath}' not found, falling back to default")
+    elif ftdi_serial:
         cmd += ["--ftdi-serial", ftdi_serial]
     if flash:
         cmd += ["-f"]
@@ -162,7 +186,7 @@ class GWCTServer:
     def start(self):
         for name, dev in self.devices.items():
             dev["uart"].open()
-            log.info(f"Device '{name}': board={dev['board']}, ftdi_serial={dev['ftdi_serial']!r}")
+            log.info(f"Device '{name}': board={dev['board']}, jtag_devpath={dev.get('jtag_devpath')!r}")
 
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
@@ -229,9 +253,10 @@ class GWCTServer:
                 device  = next(iter(self.devices.values()))
                 pending = first_byte  # process this byte as the first msg_type
 
-            uart        = device["uart"]
-            board       = device["board"]
-            ftdi_serial = device["ftdi_serial"]
+            uart          = device["uart"]
+            board         = device["board"]
+            ftdi_serial   = device.get("ftdi_serial")
+            jtag_devpath  = device.get("jtag_devpath")
 
             # ----------------------------------------------------------------
             # Main message loop
@@ -276,13 +301,14 @@ class GWCTServer:
                     recv_timeout = 180.0 if flash else 120.0
                     data = self._recv_exact(conn, file_size, timeout=recv_timeout)
                     log.info(f"{'Flash' if flash else 'Load'} {file_size} bytes "
-                             f"board={board} ftdi_serial={ftdi_serial!r}")
+                             f"board={board} jtag_devpath={jtag_devpath!r}")
 
                     with tempfile.NamedTemporaryFile(suffix=".fs", delete=False) as f:
                         f.write(data)
                         tmp = f.name
                     try:
-                        cmd = _ofl_cmd(board, ftdi_serial, tmp, flash)
+                        cmd = _ofl_cmd(board, ftdi_serial, tmp, flash,
+                                       jtag_devpath=jtag_devpath)
                         log.info(f"Running: {' '.join(cmd)}")
                         _stream_programmer(conn, cmd, timeout=recv_timeout)
                     except Exception as e:
@@ -341,9 +367,10 @@ def _load_config(path: str) -> tuple[dict, str, int]:
         if name in devices:
             raise ValueError(f"Duplicate device name in config: '{name}'")
         devices[name] = {
-            "uart":        UARTBridge(entry["uart"], entry.get("baud", DEFAULT_UART_BAUD)),
-            "board":       entry["board"],
-            "ftdi_serial": entry.get("ftdi_serial"),
+            "uart":         UARTBridge(entry["uart"], entry.get("baud", DEFAULT_UART_BAUD)),
+            "board":        entry["board"],
+            "ftdi_serial":  entry.get("ftdi_serial"),
+            "jtag_devpath": entry.get("jtag_devpath"),
         }
     return devices, host, port
 
@@ -369,6 +396,8 @@ def main():
     p.add_argument("--board",       default=DEFAULT_BOARD, help="openFPGALoader board name")
     p.add_argument("--ftdi-serial", metavar="SERIAL",
                    help="FTDI serial number passed to openFPGALoader (--ftdi-serial)")
+    p.add_argument("--jtag-devpath", metavar="PATH",
+                   help="USB devpath for JTAG programmer (e.g. '1-1.4'), resolved to --busdev-num")
 
     # Network
     p.add_argument("--host", default=SERVER_HOST)
@@ -387,9 +416,10 @@ def main():
     else:
         devices = {
             "default": {
-                "uart":        UARTBridge(args.uart, args.baud),
-                "board":       args.board,
-                "ftdi_serial": args.ftdi_serial,
+                "uart":         UARTBridge(args.uart, args.baud),
+                "board":        args.board,
+                "ftdi_serial":  args.ftdi_serial,
+                "jtag_devpath": args.jtag_devpath,
             }
         }
         host = args.host

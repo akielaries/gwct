@@ -30,17 +30,18 @@ SUBSYSTEM=="tty", ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1
 SUBSYSTEM=="tty", ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2.4:1.0", SYMLINK+="cm1_nano9k"
 
 # ── JTAG programmer tty interfaces ───────────────────────────────────────────
-# Sipeed USB Debugger (FT2232H) for mega138k.
-# iface A (if00) appears as a tty but is claimed by openFPGALoader via libusb.
-# iface B (if01) is the secondary UART — not currently in use.
+# Sipeed USB Debugger (FT2232H) — all three have non-unique/corrupted
+# serial numbers in firmware (no writable EEPROM), so we match by
+# physical USB port (KERNELS) instead.  openFPGALoader selects them via
+# --busdev-num (resolved at runtime by gwct_server from sysfs devpath).
 #
-# openFPGALoader selects this adapter with: --ftdi-serial 2025030317
+#   mega138k  → USB port 1-1.4
+#   mega60k   → USB port 1-1.1.3
+#   nano9k    → USB port 1-1.3
 
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTRS{serial}=="2025030317", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="jtag_mega138k"
-
-# TODO: add jtag_mega60k once the FT2232 serial for the 60k programmer is known.
-#   Run on the Pi: udevadm info -a /sys/bus/usb/devices/1-1.3 | grep serial
-#   Then add a rule matching ATTRS{serial}=="<serial>", ENV{ID_USB_INTERFACE_NUM}=="00"
+SUBSYSTEM=="tty", KERNELS=="1-1.4",   ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="jtag_mega138k"
+SUBSYSTEM=="tty", KERNELS=="1-1.1.3", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="jtag_mega60k"
+SUBSYSTEM=="tty", KERNELS=="1-1.3",   ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="jtag_nano9k"
 
 # ── Black Magic Probe ────────────────────────────────────────────────────────
 
