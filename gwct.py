@@ -1005,12 +1005,6 @@ Gowin Command Line Tool commands:
   dump   <addr> <count>        hex dump (4 words/line)
   watch  <addr> [interval_ms]  poll register until Ctrl-C
 
-  Addresses and values accept arithmetic expressions:
-    memrd 0x60000000 + 4
-    memrd 0x60000000 + 0x10 * 2
-    memwr 0x60000000 + 8   0xDEAD & 0xFFFF
-  Operators: + - * // % ** & | ^ ~ << >>
-
   -- device --
   list hw                      show device + sysinfo registers
   info                         alias for list hw
@@ -1037,10 +1031,6 @@ Gowin Command Line Tool commands:
   reconnect                    reopen connection
   help                         this message
   quit / exit / q              exit
-
-  Tcl support requires python3-tk:
-    sudo apt install python3-tk    (Debian/Ubuntu)
-    brew install python-tk         (macOS)
 """
 
 BANNER = """
